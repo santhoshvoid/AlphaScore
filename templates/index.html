@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlphaCross — Stock Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700;9..40,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- ── NAVBAR ─────────────────────────────────────────────── -->
+<nav class="navbar">
+    <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <div class="logo-text">
+            <span class="logo-name">AlphaCross</span>
+            <span class="logo-sub">Stock Analytics</span>
+        </div>
+    </div>
+    <button id="themeToggle" class="theme-btn" title="Toggle theme">🌙</button>
+</nav>
+
+<!-- ── ERROR ──────────────────────────────────────────────── -->
+{% if error %}
+<div class="error-banner">⚠️ {{ error }}</div>
+{% endif %}
+
+<!-- ── CONFIG BAR ─────────────────────────────────────────── -->
+{% if result %}
+<div class="config-bar">
+    📌 {{ result.symbol }} &nbsp;·&nbsp; {{ result.period }} &nbsp;·&nbsp; EMA {{ result.short_ema }}/{{ result.long_ema }}
+</div>
+{% endif %}
+
+<!-- ── MAIN GRID ───────────────────────────────────────────── -->
+<div class="container">
+
+    <!-- LEFT: CONTROL PANEL -->
+    <div class="control-panel card">
+        <form method="POST" id="mainForm">
+
+            <!-- Hidden fields — values preserved after submit -->
+            <input type="hidden" name="period"    id="periodInput"
+                   value="{{ result.period if result else '1y' }}">
+            <input type="hidden" name="short_ema" id="shortEmaInput"
+                   value="{{ result.short_ema if result else '20' }}">
+            <input type="hidden" name="long_ema"  id="longEmaInput"
+                   value="{{ result.long_ema if result else '50' }}">
+
+            <!-- Symbol -->
+            <div class="search-row">
+                <input type="text" name="symbol" id="symbolInput"
+                       value="{{ request.form.get('symbol', '') }}"
+                       placeholder="Symbol — e.g. RELIANCE.NS" required
+                       autocomplete="off" spellcheck="false">
+            </div>
+
+            <div class="controls">
+                <!-- Period -->
+                <div class="control-group">
+                    <span>Period</span>
+                    <div class="btn-group" id="periodGroup">
+                        <button type="button" data-period="3mo">3M</button>
+                        <button type="button" data-period="6mo">6M</button>
+                        <button type="button" data-period="1y">1Y</button>
+                        <button type="button" data-period="2y">2Y</button>
+                        <button type="button" data-period="5y">5Y</button>
+                    </div>
+                </div>
+
+                <!-- EMA Presets -->
+                <div class="control-group">
+                    <span>EMA Presets</span>
+                    <div class="btn-group" id="emaGroup">
+                        <button type="button" data-short="9"  data-long="21">9/21</button>
+                        <button type="button" data-short="12" data-long="26">12/26</button>
+                        <button type="button" data-short="20" data-long="50">20/50</button>
+                        <button type="button" data-short="50" data-long="200">50/200</button>
+                    </div>
+                </div>
+
+                <!-- Custom EMA -->
+                <div class="control-group">
+                    <span>Custom EMA</span>
+                    <div class="ema-inputs">
+                        <input type="number" id="customShort" placeholder="Short" min="1">
+                        <span>/</span>
+                        <input type="number" id="customLong"  placeholder="Long"  min="1">
+                    </div>
+                </div>
+
+                <button type="submit" class="analyze-btn" id="analyzeBtn">Analyze</button>
+            </div>
+
+        </form>
+    </div>
+
+    <!-- RIGHT: PERFORMANCE or EMPTY STATE -->
+    {% if result %}
+    <div class="card perf-card anim" style="animation-delay:0.05s">
+
+        <h2>📊 Performance</h2>
+
+        <!-- Row 1: Core metrics -->
+        <div class="metrics-grid metrics-row-1">
+            <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}">
+                <div class="metric-label">Total Return</div>
+                <div class="metric-value">{{ "%.2f"|format(result.metrics['Total Return (%)']) }}%</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Win Rate</div>
+                <div class="metric-value">{{ "%.1f"|format(result.metrics['Win Rate (%)']) }}%</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Trades</div>
+                <div class="metric-value">{{ result.metrics['Number of Trades'] }}</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Health</div>
+                <div class="metric-value">{{ result.health_score }}</div>
+            </div>
+        </div>
+
+        <!-- Row 2: Advanced metrics -->
+        <div class="metrics-grid metrics-row-2">
+            <div class="metric-box adv {% if result.cagr > 0 %}profit{% else %}loss{% endif %}">
+                <div class="metric-label">CAGR</div>
+                <div class="metric-value">{{ "%.1f"|format(result.cagr) }}%</div>
+            </div>
+            <div class="metric-box adv loss">
+                <div class="metric-label">Max Drawdown</div>
+                <div class="metric-value">{{ "%.1f"|format(result.max_drawdown) }}%</div>
+            </div>
+            <div class="metric-box adv {% if result.sharpe > 1 %}profit{% elif result.sharpe > 0 %}neutral{% else %}loss{% endif %}">
+                <div class="metric-label">Sharpe</div>
+                <div class="metric-value">{{ "%.2f"|format(result.sharpe) }}</div>
+            </div>
+            <div class="metric-box adv {% if result.best_trade > 0 %}profit{% else %}loss{% endif %}">
+                <div class="metric-label">Best Trade</div>
+                <div class="metric-value">{{ "%.1f"|format(result.best_trade) }}%</div>
+            </div>
+        </div>
+
+        <!-- Market Bias -->
+        <div class="bias-row">
+            <span class="bias-label">Market Bias</span>
+            <span class="bias-badge">{{ result.bias }}</span>
+        </div>
+        <p class="bias-info">
+        Market Bias shows whether this EMA strategy generates more buy or sell signals over time.
+        </p>
+        <p class="bias-desc {{ result.bias | lower }}">
+            {{ result.bias_description }}
+        </p>
+
+    </div>
+
+    {% else %}
+    <div class="card empty-state anim">
+        <div class="empty-icon">📈</div>
+        <p class="empty-title">Ready to analyze</p>
+        <p class="empty-sub">Enter a stock symbol and hit Analyze to see EMA crossover signals, backtest results, and strategy intelligence.</p>
+    </div>
+    {% endif %}
+
+</div><!-- end .container -->
+
+{% if result %}
+
+<!-- ── CHART ───────────────────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width chart-card anim" style="animation-delay:0.10s">
+    <div class="chart-header">
+        <h2>📈 Price Chart</h2>
+        <div class="chart-actions">
+            <span class="chart-hint">Scroll to zoom · Drag to pan</span>
+            <button class="chart-btn" id="resetZoom">Reset Zoom</button>
+        </div>
+    </div>
+    <div class="chart-canvas-wrap" id="chartWrap">
+        <canvas id="stockChart"></canvas>
+    </div>
+</div>
+
+<!-- ── PORTFOLIO GROWTH ────────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width anim" style="animation-delay:0.13s">
+    <div class="portfolio-header">
+        <div>
+            <h2>💼 Portfolio Growth Simulator</h2>
+            <p style="margin:0;font-size:12px;">
+                See how your capital would have grown using this strategy:<br>
+                • Golden Cross → Buy signal<br>
+                • Death Cross → Sell signal
+            </p>
+        </div>
+        <div class="portfolio-input-row">
+            <span class="portfolio-currency">₹</span>
+            <input type="number" id="capitalInput" value="100000"
+                   min="1000" step="1000" placeholder="Initial capital">
+            <button class="chart-btn port-run-btn" id="runPortfolio">Simulate</button>
+        </div>
+    </div>
+
+    {% if portfolio %}
+    <div class="portfolio-stats" id="portfolioStats">
+        <div class="port-stat {% if portfolio.total_gain_pct > 0 %}profit{% else %}loss{% endif %}">
+            <div class="port-stat-label">Final Value</div>
+            <div class="port-stat-value">₹{{ "{:,.0f}".format(portfolio.final) }}</div>
+        </div>
+        <div class="port-stat {% if portfolio.total_gain > 0 %}profit{% else %}loss{% endif %}">
+            <div class="port-stat-label">Total Gain/Loss</div>
+            <div class="port-stat-value">{{ "+" if portfolio.total_gain > 0 else "" }}₹{{ "{:,.0f}".format(portfolio.total_gain) }}</div>
+        </div>
+        <div class="port-stat {% if portfolio.total_gain_pct > 0 %}profit{% else %}loss{% endif %}">
+            <div class="port-stat-label">Return %</div>
+            <div class="port-stat-value">{{ "+" if portfolio.total_gain_pct > 0 else "" }}{{ "%.2f"|format(portfolio.total_gain_pct) }}%</div>
+        </div>
+        <div class="port-stat">
+            <div class="port-stat-label">Trades Taken</div>
+            <div class="port-stat-value">{{ portfolio.history|length - 1 }}</div>
+        </div>
+    </div>
+    <div class="chart-canvas-wrap portfolio-chart-wrap">
+        <canvas id="portfolioChart"></canvas>
+    </div>
+    {% endif %}
+</div>
+
+<!-- ── TRADE HISTORY ───────────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width anim" style="animation-delay:0.15s">
+    <h2>💰 Trade History — Generated from EMA crossover signals used in the portfolio simulation</h2>
+
+    {% if result.detailed_trades %}
+    <details>
+        <summary>📂 View {{ result.detailed_trades|length }} Trades</summary>
+        <p style="font-size:12px; color:var(--text-xmuted); margin:10px 0 12px;">
+            Trades are generated when EMA short crosses EMA long:<br>
+            • Golden Cross → Buy signal<br>
+            • Death Cross → Sell signal<br>
+            (Return shows % profit/loss per trade. Quality classifies trades into Big Win, Small Win, or Loss.)
+        </p>
+        <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>Buy Date</th><th>Buy Price</th>
+                <th>Sell Date</th><th>Sell Price</th>
+                <th>Return</th><th>Quality</th>
+            </tr></thead>
+            <tbody>
+            {% for t in result.detailed_trades %}
+            <tr>
+                <td class="td-mono">{{ t.buy_date  | string | replace(' 00:00:00','') }}</td>
+                <td class="td-mono">{{ "%.2f"|format(t.buy_price) }}</td>
+                <td class="td-mono">{{ t.sell_date | string | replace(' 00:00:00','') }}</td>
+                <td class="td-mono">{{ "%.2f"|format(t.sell_price) }}</td>
+                <td class="td-mono {{ 'profit' if t.return >= 0 else 'loss' }}">{{ "%.2f"|format(t.return) }}%</td>
+                <td class="{% if t.quality == 'Big Win' %}profit{% elif t.quality == 'Small Win' %}gc{% else %}loss{% endif %}">{{ t.quality }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+    {% else %}
+    <p style="color:var(--text-xmuted);font-size:13px;">No completed trades in this period.</p>
+    {% endif %}
+</div>
+
+<!-- ── STRATEGY COMPARISON ─────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width anim" style="animation-delay:0.23s" id="compareSection">
+    <h2>⚔️ Strategy Comparison</h2>
+    <p style="font-size:12px;margin-bottom:16px;">
+        Compare how different EMA pairs perform on the same symbol and period.
+        Click any preset or enter a custom pair, then hit Compare.
+    </p>
+
+    <div class="compare-controls">
+        <div class="btn-group" id="compareEmaGroup">
+            <button type="button" data-short="9"  data-long="21"  class="cmp-btn">9/21</button>
+            <button type="button" data-short="12" data-long="26"  class="cmp-btn">12/26</button>
+            <button type="button" data-short="20" data-long="50"  class="cmp-btn active">20/50</button>
+            <button type="button" data-short="50" data-long="200" class="cmp-btn">50/200</button>
+        </div>
+        <div class="compare-custom-row">
+            <span style="font-size:11px;color:var(--text-xmuted);font-weight:600;">CUSTOM</span>
+            <input type="number" id="cmpShort" placeholder="Short" min="1">
+            <span style="color:var(--text-xmuted)">/</span>
+            <input type="number" id="cmpLong"  placeholder="Long"  min="1">
+            <button class="chart-btn cmp-run-btn" id="runCompare">Compare</button>
+        </div>
+    </div>
+
+    <!-- Comparison Results -->
+    <div id="compareResults" class="compare-results hidden">
+        <div class="compare-grid" id="compareGrid">
+            <!-- Cards added by JS -->
+        </div>
+        <div class="compare-insight" id="compareInsight"></div>
+    </div>
+    <div id="compareLoading" class="compare-loading hidden">
+        <span class="btn-spinner" style="border-color:rgba(108,92,231,0.3);border-top-color:var(--accent);width:18px;height:18px;"></span>
+        <span style="font-size:13px;color:var(--text-muted);margin-left:10px;">Running backtest…</span>
+    </div>
+    <div id="compareError" class="compare-error hidden"></div>
+</div>
+
+<!-- ── DIRECTIONAL ACCURACY ────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width anim" style="animation-delay:0.20s">
+    <h2>🧠 Directional Accuracy</h2>
+    <p style="font-size:12px;margin-bottom:14px;">
+        Measures how often price moved in the expected direction after each signal (buy → price up, sell → price down).<br>
+        Accuracy is calculated for multiple timeframes (1 day, 3 days, 1 week, 1 month) to show how signal reliability changes over time.
+    </p>
+
+    {% if result.analysis %}
+    <div class="accuracy-grid">
+        {% for k, v in result.analysis.items() %}
+        <div class="acc-box">
+            <div class="acc-period">{{ k }}</div>
+            <div class="acc-value {% if v >= 55 %}pos{% elif v < 45 %}neg{% else %}neu{% endif %}">
+                {{ "%.0f"|format(v) }}%
+            </div>
+            <div class="acc-bar">
+                <div class="acc-fill" style="width:{{ v }}%;background:{% if v >= 55 %}#059669{% elif v < 45 %}#dc2626{% else %}#6c5ce7{% endif %}"></div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p style="color:var(--text-xmuted)">No analysis available.</p>
+    {% endif %}
+</div>
+
+
+
+<!-- ── SIGNAL INTELLIGENCE ─────────────────────────────────── -->
+<div class="spacer"></div>
+<div class="card full-width anim" style="animation-delay:0.25s">
+    <h2>📋 Signal Intelligence - Strength and reliability analysis of EMA crossover signals used in the Directional Accuracy above</h2>
+
+    {% if result.table %}
+    <details>
+        <summary>📂 View {{ result.table|length }} Signals</summary>
+        <p style="font-size:12px; color:var(--text-xmuted); margin:10px 0 12px;">
+            Each row shows how strong and reliable a signal was, along with future returns after the signal.<br>
+            (Strength = crossover momentum · Confidence = historical success rate · Label = overall signal quality)
+        </p>
+        <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>Date</th><th>Type</th><th>Price</th>
+                <th>EMA S</th><th>EMA L</th><th>Strength</th>
+                <th>Confidence</th><th>Label</th>
+                <th>+1D</th><th>+3D</th><th>+1W</th><th>+1M</th>
+            </tr></thead>
+            <tbody>
+            {% for row in result.table %}
+            <tr>
+                <td class="td-mono">{{ row.Date }}</td>
+                <td class="{{ 'gc' if row.type == 'GC' else 'dc' }}">{{ row.type }}</td>
+                <td class="td-mono">{{ "%.2f"|format(row.Price) }}</td>
+                <td class="td-mono">{{ "%.2f"|format(row.EMA_Short) }}</td>
+                <td class="td-mono">{{ "%.2f"|format(row.EMA_Long) }}</td>
+                <td class="td-mono">{{ "%.2f"|format(row.Strength) }}</td>
+                <td class="td-mono">{{ "%.1f"|format(row.Confidence) }}%</td>
+                <td>{{ row.Label }}</td>
+                <td class="td-mono {{ 'profit' if row['+1D'] is not none and row['+1D'] >= 0 else 'loss' }}">
+                    {{ "%.2f"|format(row['+1D']) if row['+1D'] is not none else '—' }}{% if row['+1D'] is not none %}%{% endif %}
+                </td>
+                <td class="td-mono {{ 'profit' if row['+3D'] is not none and row['+3D'] >= 0 else 'loss' }}">
+                    {{ "%.2f"|format(row['+3D']) if row['+3D'] is not none else '—' }}{% if row['+3D'] is not none %}%{% endif %}
+                </td>
+                <td class="td-mono {{ 'profit' if row['+1W'] is not none and row['+1W'] >= 0 else 'loss' }}">
+                    {{ "%.2f"|format(row['+1W']) if row['+1W'] is not none else '—' }}{% if row['+1W'] is not none %}%{% endif %}
+                </td>
+                <td class="td-mono {{ 'profit' if row['+1M'] is not none and row['+1M'] >= 0 else 'loss' }}">
+                    {{ "%.2f"|format(row['+1M']) if row['+1M'] is not none else '—' }}{% if row['+1M'] is not none %}%{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+    {% else %}
+    <p style="color:var(--text-xmuted)">No signals found.</p>
+    {% endif %}
+</div>
+
+{% endif %}
+
+<!-- =============================================================
+     SCRIPTS
+     ============================================================= -->
+
+<!-- 1. THEME + FLOATING -->
+<script>
+(function() {
+    var btn = document.getElementById('themeToggle');
+    var THRESHOLD = 80;
+    var floating  = false;
+
+    if (localStorage.getItem('theme') === 'dark') {
+        document.body.classList.add('dark');
+        btn.textContent = '☀️';
+    }
+
+    btn.onclick = function() {
+        document.body.classList.toggle('dark');
+        var isDark = document.body.classList.contains('dark');
+        btn.textContent = isDark ? '☀️' : '🌙';
+        localStorage.setItem('theme', isDark ? 'dark' : 'light');
+        // Rebuild charts on theme switch
+        setTimeout(function() { if (window._rebuildCharts) window._rebuildCharts(); }, 60);
+    };
+
+    window.addEventListener('scroll', function() {
+        var should = window.scrollY > THRESHOLD;
+        if (should !== floating) {
+            floating = should;
+            btn.classList.toggle('is-floating', floating);
+        }
+    }, { passive: true });
+})();
+</script>
+
+<!-- 2. FORM CONTROLS + BUTTON PERSISTENCE -->
+<script>
+(function() {
+    // Read persisted values
+    var savedPeriod = document.getElementById('periodInput').value;
+    var savedShort  = document.getElementById('shortEmaInput').value;
+    var savedLong   = document.getElementById('longEmaInput').value;
+
+    // Restore period active button
+    document.querySelectorAll('#periodGroup button').forEach(function(b) {
+        if (b.dataset.period === savedPeriod) b.classList.add('active');
+        b.addEventListener('click', function() {
+            document.querySelectorAll('#periodGroup button').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            document.getElementById('periodInput').value = b.dataset.period;
+        });
+    });
+
+    // Restore EMA active button
+    document.querySelectorAll('#emaGroup button').forEach(function(b) {
+        if (b.dataset.short === String(savedShort) && b.dataset.long === String(savedLong)) {
+            b.classList.add('active');
+        }
+        b.addEventListener('click', function() {
+            document.querySelectorAll('#emaGroup button').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            document.getElementById('shortEmaInput').value = b.dataset.short;
+            document.getElementById('longEmaInput').value  = b.dataset.long;
+            document.getElementById('customShort').value   = b.dataset.short;
+            document.getElementById('customLong').value    = b.dataset.long;
+        });
+    });
+
+    // Restore custom EMA display
+    var isPreset = false;
+    document.querySelectorAll('#emaGroup button').forEach(function(b) {
+        if (b.classList.contains('active')) isPreset = true;
+    });
+    if (!isPreset) {
+        document.getElementById('customShort').value = savedShort;
+        document.getElementById('customLong').value  = savedLong;
+    }
+
+    // Custom EMA inputs
+    document.getElementById('customShort').addEventListener('input', function() {
+        if (this.value) {
+            document.getElementById('shortEmaInput').value = this.value;
+            document.querySelectorAll('#emaGroup button').forEach(function(x) { x.classList.remove('active'); });
+        }
+    });
+    document.getElementById('customLong').addEventListener('input', function() {
+        if (this.value) {
+            document.getElementById('longEmaInput').value = this.value;
+            document.querySelectorAll('#emaGroup button').forEach(function(x) { x.classList.remove('active'); });
+        }
+    });
+
+    // Loading state
+    document.getElementById('mainForm').addEventListener('submit', function() {
+        var btn = document.getElementById('analyzeBtn');
+        btn.innerHTML = '<span class="btn-spinner"></span>Analyzing…';
+        btn.disabled = true;
+    });
+})();
+</script>
+
+<!-- 3. CHART.JS + ZOOM -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+{% if result and prices and ema_short and ema_long and dates %}
+<script>
+(function() {
+    var labels        = {{ dates       | tojson | safe }};
+    var priceData     = {{ prices      | tojson | safe }};
+    var emaShortData  = {{ ema_short   | tojson | safe }};
+    var emaLongData   = {{ ema_long    | tojson | safe }};
+    var buyPointsRaw  = {{ buy_points  | tojson | safe }};
+    var sellPointsRaw = {{ sell_points | tojson | safe }};
+
+    var buyData  = labels.map(function(d) { var p = buyPointsRaw.find(function(x)  { return x.x === d; }); return p ? p.y : null; });
+    var sellData = labels.map(function(d) { var p = sellPointsRaw.find(function(x) { return x.x === d; }); return p ? p.y : null; });
+
+    var priceChart = null;
+
+    function buildPriceChart() {
+        var canvas = document.getElementById('stockChart');
+        if (!canvas) return;
+
+        if (priceChart) { priceChart.destroy(); priceChart = null; }
+
+        var isDark      = document.body.classList.contains('dark');
+        var gridColor   = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.07)';
+        var tickColor   = isDark ? '#4a6080' : '#64748b';
+        var legendColor = isDark ? '#8899aa' : '#374151';
+        var tooltipBg   = isDark ? '#0d1830' : '#ffffff';
+        var tooltipTitle = isDark ? '#8eb8e8' : '#1a1a2e';
+        var tooltipBody  = isDark ? '#6a8aaa' : '#64748b';
+
+        // Background plugin — dark panel always for chart
+        var bgPlugin = {
+            id: 'chartBg',
+            beforeDraw: function(chart) {
+                var c = chart.ctx;
+                c.save();
+                c.globalCompositeOperation = 'destination-over';
+                c.fillStyle = isDark ? '#0b0f1a' : '#ffffff';
+                c.fillRect(0, 0, chart.width, chart.height);
+                c.restore();
+            }
+        };
+
+        priceChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label:'Price',     data:priceData,    borderColor:'#4e9af1', borderWidth:1.8, tension:0.2, spanGaps:true, pointRadius:0, order:2 },
+                    { label:'EMA Short', data:emaShortData, borderColor:'#f06292', borderDash:[5,5],  borderWidth:1.5, spanGaps:true, pointRadius:0, order:3 },
+                    { label:'EMA Long',  data:emaLongData,  borderColor:'#ffb74d', borderDash:[8,4],  borderWidth:1.5, spanGaps:true, pointRadius:0, order:3 },
+                    { label:'BUY',  data:buyData,  pointBackgroundColor:'#00e676', pointBorderColor:'rgba(0,230,118,0.25)',  pointBorderWidth:4, pointRadius:7, pointHoverRadius:10, borderWidth:0, showLine:false, order:1 },
+                    { label:'SELL', data:sellData, pointBackgroundColor:'#ff5252', pointBorderColor:'rgba(255,82,82,0.25)',  pointBorderWidth:4, pointRadius:7, pointHoverRadius:10, borderWidth:0, showLine:false, order:1 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 500, easing: 'easeOutQuart' },
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { labels: { color:legendColor, font:{size:11,family:"'JetBrains Mono',monospace"}, padding:18, usePointStyle:true, pointStyleWidth:12 } },
+                    tooltip: {
+                        backgroundColor: tooltipBg,
+                        titleColor: tooltipTitle,
+                        bodyColor: tooltipBody,
+                        borderColor: isDark ? 'rgba(78,154,241,0.2)' : 'rgba(0,0,0,0.08)',
+                        borderWidth: 1,
+                        padding: 12,
+                        cornerRadius: 10,
+                        titleFont: { size:11, family:"'JetBrains Mono',monospace" },
+                        bodyFont:  { size:11, family:"'JetBrains Mono',monospace" }
+                    },
+                    zoom: {
+                        zoom: { wheel:{ enabled:true, speed:0.08 }, pinch:{ enabled:true }, mode:'x' },
+                        pan:  { enabled:true, mode:'x' }
+                    }
+                },
+                scales: {
+                    x: { ticks:{color:tickColor, font:{size:10,family:"'JetBrains Mono',monospace"}, maxTicksLimit:10}, grid:{color:gridColor}, border:{color:'rgba(255,255,255,0.04)'} },
+                    y: { ticks:{color:tickColor, font:{size:10,family:"'JetBrains Mono',monospace"}, padding:8},        grid:{color:gridColor}, border:{color:'rgba(255,255,255,0.04)'} }
+                }
+            },
+            plugins: [bgPlugin]
+        });
+
+        document.getElementById('resetZoom').onclick = function() { priceChart.resetZoom(); };
+    }
+
+    // Grab cursor on chart wrap
+    var wrap = document.getElementById('chartWrap');
+    if (wrap) {
+        wrap.style.cursor = 'grab';
+        wrap.addEventListener('mousedown', function() { wrap.style.cursor = 'grabbing'; });
+        wrap.addEventListener('mouseup',   function() { wrap.style.cursor = 'grab'; });
+        wrap.addEventListener('mouseleave',function() { wrap.style.cursor = 'grab'; });
+    }
+
+    buildPriceChart();
+    window._rebuildCharts = buildPriceChart;
+})();
+</script>
+{% endif %}
+
+<!-- 4. PORTFOLIO GROWTH CHART -->
+{% if result and portfolio %}
+<script>
+(function() {
+    var portfolioData = {{ portfolio | tojson | safe }};
+    var portChart = null;
+
+    function buildPortfolioChart(data) {
+        var canvas = document.getElementById('portfolioChart');
+        if (!canvas) return;
+
+        if (portChart) { portChart.destroy(); portChart = null; }
+
+        var isDark   = document.body.classList.contains('dark');
+        var labels   = data.history.map(function(h) { return h.date; });
+        var capitals = data.history.map(function(h) { return h.capital; });
+
+        var isProfit = capitals[capitals.length - 1] >= capitals[0];
+        var lineColor = isProfit ? '#00e676' : '#ff5252';
+        var fillColor = isProfit ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)';
+        var gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.07)';
+        var tickColor = isDark ? '#4a6080' : '#64748b';
+
+        portChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Portfolio Value (₹)',
+                    data: capitals,
+                    borderColor: lineColor,
+                    borderWidth: 2.5,
+                    tension: 0.35,
+                    fill: true,
+                    backgroundColor: fillColor,
+                    pointRadius: 6,
+                    pointBackgroundColor: lineColor,
+                    pointBorderColor: isDark ? '#0b0f1a' : '#ffffff',
+                    pointBorderWidth: 2,
+                    pointHoverRadius: 9
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 700, easing: 'easeOutCubic' },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: isDark ? '#0d1830' : '#ffffff',
+                        titleColor: isDark ? '#8eb8e8' : '#1a1a2e',
+                        bodyColor: isDark ? '#6a8aaa' : '#64748b',
+                        borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                        borderWidth: 1,
+                        padding: 12,
+                        cornerRadius: 10,
+                        callbacks: {
+                            label: function(ctx) {
+                                return ' ₹' + ctx.raw.toLocaleString('en-IN');
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { ticks:{color:tickColor, font:{size:11}}, grid:{color:gridColor} },
+                    y: {
+                        ticks: {
+                            color: tickColor, font:{size:11},
+                            callback: function(v) { return '₹' + (v/1000).toFixed(0) + 'k'; }
+                        },
+                        grid:{color:gridColor}
+                    }
+                }
+            }
+        });
+    }
+
+    function updatePortfolioStats(data) {
+        var stats = document.getElementById('portfolioStats');
+        if (!stats) return;
+        var items = stats.querySelectorAll('.port-stat-value');
+        if (items.length >= 4) {
+            items[0].textContent = '₹' + data.final.toLocaleString('en-IN');
+            var gainSign = data.total_gain >= 0 ? '+' : '';
+            items[1].textContent = gainSign + '₹' + data.total_gain.toLocaleString('en-IN');
+            items[2].textContent = gainSign + data.total_gain_pct.toFixed(2) + '%';
+            items[3].textContent = (data.history.length - 1).toString();
+        }
+        stats.querySelectorAll('.port-stat').forEach(function(s, i) {
+            if (i < 3) {
+                s.classList.remove('profit','loss');
+                s.classList.add(data.total_gain_pct >= 0 ? 'profit' : 'loss');
+            }
+        });
+    }
+
+    buildPortfolioChart(portfolioData);
+
+    // Re-simulate on capital change
+    document.getElementById('runPortfolio').addEventListener('click', function() {
+        var capital = parseFloat(document.getElementById('capitalInput').value);
+        if (isNaN(capital) || capital < 1) { alert('Please enter a valid capital amount.'); return; }
+
+        // Recalculate client-side
+        var trades  = {{ result.detailed_trades | tojson | safe }};
+        var c = capital;
+        var history = [{ date:'Start', capital: Math.round(c * 100) / 100 }];
+        trades.forEach(function(t) {
+            c = c * (1 + t['return'] / 100);
+            history.push({
+                date: String(t.sell_date).replace(' 00:00:00',''),
+                capital: Math.round(c * 100) / 100
+            });
+        });
+
+        var finalVal   = Math.round(c * 100) / 100;
+        var gain       = Math.round((finalVal - capital) * 100) / 100;
+        var gainPct    = Math.round((gain / capital) * 10000) / 100;
+        var newData    = { history: history, final: finalVal, total_gain: gain, total_gain_pct: gainPct };
+
+        buildPortfolioChart(newData);
+        updatePortfolioStats(newData);
+    });
+
+    // Rebuild on theme toggle
+    var _origRebuild = window._rebuildCharts;
+    window._rebuildCharts = function() {
+        if (_origRebuild) _origRebuild();
+        var cap = parseFloat(document.getElementById('capitalInput').value) || 100000;
+        var trades = {{ result.detailed_trades | tojson | safe }};
+        var c = cap;
+        var history = [{ date:'Start', capital:cap }];
+        trades.forEach(function(t) {
+            c = c * (1 + t['return'] / 100);
+            history.push({ date:String(t.sell_date).replace(' 00:00:00',''), capital:Math.round(c*100)/100 });
+        });
+        buildPortfolioChart({ history:history, final:Math.round(c*100)/100, total_gain:Math.round((c-cap)*100)/100, total_gain_pct:Math.round(((c-cap)/cap)*10000)/100 });
+    };
+})();
+</script>
+{% endif %}
+
+<!-- 5. STRATEGY COMPARISON -->
+{% if result %}
+<script>
+(function() {
+    var currentSymbol = {{ (result.symbol if result else "") | tojson | safe }};
+    var currentPeriod = {{ (result.period if result else "1y") | tojson | safe }};
+
+    var selectedShort = 20;
+    var selectedLong  = 50;
+
+    // Preset button active state
+    document.querySelectorAll('.cmp-btn').forEach(function(b) {
+        b.addEventListener('click', function() {
+            document.querySelectorAll('.cmp-btn').forEach(function(x) { x.classList.remove('active'); });
+            b.classList.add('active');
+            selectedShort = parseInt(b.dataset.short);
+            selectedLong  = parseInt(b.dataset.long);
+            document.getElementById('cmpShort').value = '';
+            document.getElementById('cmpLong').value  = '';
+        });
+    });
+
+    function runComparison(shortEma, longEma) {
+        var loading = document.getElementById('compareLoading');
+        var results = document.getElementById('compareResults');
+        var errDiv  = document.getElementById('compareError');
+
+        var symbolInput = document.getElementById("symbolInput").value;
+
+        if (!symbolInput) {
+            alert("Enter a stock symbol first");
+            return;
+        }
+        loading.classList.remove('hidden');
+        results.classList.add('hidden');
+        errDiv.classList.add('hidden');
+
+        fetch('/api/compare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                symbol:    symbolInput,
+                period:    currentPeriod,
+                short_ema: shortEma,
+                long_ema:  longEma
+            })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            loading.classList.add('hidden');
+            if (d.error) {
+                errDiv.textContent = '⚠️ ' + d.error;
+                errDiv.classList.remove('hidden');
+                return;
+            }
+            renderCompareResult(d);
+        })
+        .catch(function(e) {
+            loading.classList.add('hidden');
+            errDiv.textContent = '⚠️ Request failed. Try again.';
+            errDiv.classList.remove('hidden');
+        });
+    }
+
+    function renderCompareResult(d) {
+        var grid    = document.getElementById('compareGrid');
+        var insight = document.getElementById('compareInsight');
+        var results = document.getElementById('compareResults');
+
+        // Build or update existing cards
+        var card = document.createElement('div');
+        card.className = 'cmp-result-card';
+        card.innerHTML =
+            '<div class="cmp-label">EMA ' + d.label + '</div>' +
+            '<div class="cmp-metrics">' +
+                '<div class="cmp-metric"><span class="cmp-m-label">Return</span><span class="cmp-m-value ' + (d.total_return >= 0 ? 'profit' : 'loss') + '">' + d.total_return.toFixed(2) + '%</span></div>' +
+                '<div class="cmp-metric"><span class="cmp-m-label">Win Rate</span><span class="cmp-m-value">' + d.win_rate.toFixed(1) + '%</span></div>' +
+                '<div class="cmp-metric"><span class="cmp-m-label">Trades</span><span class="cmp-m-value">' + d.trades + '</span></div>' +
+                '<div class="cmp-metric"><span class="cmp-m-label">CAGR</span><span class="cmp-m-value ' + (d.cagr >= 0 ? 'profit' : 'loss') + '">' + d.cagr.toFixed(1) + '%</span></div>' +
+                '<div class="cmp-metric"><span class="cmp-m-label">Sharpe</span><span class="cmp-m-value">' + d.sharpe.toFixed(2) + '</span></div>' +
+                '<div class="cmp-metric"><span class="cmp-m-label">Max DD</span><span class="cmp-m-value loss">' + d.max_dd.toFixed(1) + '%</span></div>' +
+            '</div>';
+
+        grid.appendChild(card);
+        insight.textContent = '💡 ' + d.insight;
+        results.classList.remove('hidden');
+    }
+
+    document.getElementById('runCompare').addEventListener('click', function() {
+        var cShort = parseInt(document.getElementById('cmpShort').value);
+        var cLong  = parseInt(document.getElementById('cmpLong').value);
+
+        if (!isNaN(cShort) && !isNaN(cLong) && cShort > 0 && cLong > cShort) {
+            selectedShort = cShort;
+            selectedLong  = cLong;
+            document.querySelectorAll('.cmp-btn').forEach(function(x) { x.classList.remove('active'); });
+        }
+
+        runComparison(selectedShort, selectedLong);
+    });
+
+    // Default: run current EMA on load
+    {% if result %}
+    runComparison({{ result.short_ema }}, {{ result.long_ema }});
+    {% endif %}
+})();
+</script>
+{% endif %}
+
+</body>
+</html>
