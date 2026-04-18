@@ -12,53 +12,55 @@ def classify_trade(r):
         return "Loss"
 
 
-def backtest(data, signals):
-    """
-    Walks through every crossover signal and simulates trades.
-    BUY on Golden Cross, SELL on Death Cross.
-    Returns a list of trade dicts with 'return' and 'quality' keys.
-    """
-    position    = None
+def backtest(data, signals, initial_capital=100000):
+    position = None
     entry_price = 0.0
-    trades      = []
+    capital = initial_capital
+
+    trades = []
+    equity_curve = [{"date": "Start", "capital": capital}]
 
     for signal, date in signals:
-        # Use .loc for label-based access; scalar() converts Series to float
-        price_raw = data.loc[date, "Close"]
-        price     = float(price_raw.iloc[0]) if hasattr(price_raw, "iloc") else float(price_raw)
+        price = float(data.loc[date, "Close"])
 
         if signal == "BUY" and position is None:
-            position    = "HOLD"
+            position = "HOLD"
             entry_price = price
 
         elif signal == "SELL" and position == "HOLD":
-            profit  = (price - entry_price) / entry_price * 100
-            quality = classify_trade(profit)
+            ret_pct = ((price - entry_price) / entry_price)
+
+            # ✅ CAPITAL UPDATE (REAL TRADING)
+            capital = capital * (1 + ret_pct)
+
             trades.append({
-                "return":  round(profit, 4),
-                "quality": quality,
+                "return_pct": round(ret_pct * 100, 4),
+                "capital": round(capital, 2)
             })
+
+            equity_curve.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "capital": round(capital, 2)
+            })
+
             position = None
 
-    return trades
+    return trades, equity_curve, capital
 
 
-def calculate_metrics(trades):
-    """
-    Summarise a list of trade dicts into key performance metrics.
-    """
+def calculate_metrics(trades, initial_capital, final_capital):
     if not trades:
         return {
-            "Total Return (%)":  0.0,
-            "Win Rate (%)":      0.0,
-            "Number of Trades":  0,
+            "Total Return (%)": 0.0,
+            "Win Rate (%)": 0.0,
+            "Number of Trades": 0,
         }
 
-    total_return = sum(t["return"] for t in trades)
-    wins         = sum(1 for t in trades if t["return"] > 0)
+    total_return_pct = ((final_capital - initial_capital) / initial_capital) * 100
+    wins = sum(1 for t in trades if t["return_pct"] > 0)
 
     return {
-        "Total Return (%)": round(total_return, 4),
-        "Win Rate (%)":     round((wins / len(trades)) * 100, 2),
+        "Total Return (%)": round(total_return_pct, 4),
+        "Win Rate (%)": round((wins / len(trades)) * 100, 2),
         "Number of Trades": len(trades),
     }

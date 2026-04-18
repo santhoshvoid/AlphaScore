@@ -93,6 +93,7 @@
                 </div>
 
                 <button type="submit" class="analyze-btn" id="analyzeBtn">Analyze</button>
+                <p id="status-text" class="status-text"></p>
                 {% if watchlist %}
                 <div class="recent-section">
                     <span class="recent-label">Recently Analyzed</span>
@@ -110,82 +111,82 @@
 
         </form>
     </div>
+    <div id="result-container">
+        <!-- RIGHT: PERFORMANCE or EMPTY STATE -->
+        {% if result %}
+        <div class="card perf-card anim" style="animation-delay:0.05s">
 
-    <!-- RIGHT: PERFORMANCE or EMPTY STATE -->
-    {% if result %}
-    <div class="card perf-card anim" style="animation-delay:0.05s">
+            <h2>📊 Performance</h2>
 
-        <h2>📊 Performance</h2>
+            <!-- Row 1: Core metrics -->
+            <div class="metrics-grid metrics-row-1">
+                <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}"
+                    data-tooltip="Total profit or loss from all completed Buy→Sell trades combined">
+                    <div class="metric-label">Total Return</div>
+                    <div class="metric-value">{{ "%.2f"|format(result.metrics['Total Return (%)']) }}%</div>
+                </div>
+                <div class="metric-box"
+                    data-tooltip="Percentage of trades that closed in profit — 50%+ beats random chance">
+                    <div class="metric-label">Win Rate</div>
+                    <div class="metric-value">{{ "%.1f"|format(result.metrics['Win Rate (%)']) }}%</div>
+                </div>
+                <div class="metric-box"
+                    data-tooltip="Total completed Buy→Sell round-trip trade cycles in this backtest">
+                    <div class="metric-label">Trades</div>
+                    <div class="metric-value">{{ result.metrics['Number of Trades'] }}</div>
+                </div>
+                <div class="metric-box"
+                    data-tooltip="Composite score: Return (40%) + Win Rate (40%) + Signal Reliability (20%) — max 100">
+                    <div class="metric-label">Health</div>
+                    <div class="metric-value">{{ result.health_score }}</div>
+                </div>
+            </div>
+    
+            <!-- Row 2: Advanced metrics -->
+            <div class="metrics-grid metrics-row-2">
+                <div class="metric-box adv {% if result.cagr > 0 %}profit{% else %}loss{% endif %}"
+                    data-tooltip="Compounded Annual Growth Rate — the equivalent fixed yearly return if held consistently">
+                    <div class="metric-label">CAGR</div>
+                    <div class="metric-value">{{ "%.1f"|format(result.cagr) }}%</div>
+                </div>
+                <div class="metric-box adv loss"
+                    data-tooltip="Largest peak-to-trough portfolio drop before recovering — lower is safer">
+                    <div class="metric-label">Max Drawdown</div>
+                    <div class="metric-value">{{ "%.1f"|format(result.max_drawdown) }}%</div>
+                </div>
+                <div class="metric-box adv {% if result.sharpe > 1 %}profit{% elif result.sharpe > 0 %}neutral{% else %}loss{% endif %}"
+                    data-tooltip="Risk-adjusted return per unit of volatility — above 1.0 is good, above 2.0 is excellent">
+                    <div class="metric-label">Sharpe</div>
+                    <div class="metric-value">{{ "%.2f"|format(result.sharpe) }}</div>
+                </div>
+                <div class="metric-box adv {% if result.best_trade > 0 %}profit{% else %}loss{% endif %}"
+                    data-tooltip="Highest single-trade return — shows the strategy's best-case upside">
+                    <div class="metric-label">Best Trade</div>
+                    <div class="metric-value">{{ "%.1f"|format(result.best_trade) }}%</div>
+                </div>
+            </div>
 
-        <!-- Row 1: Core metrics -->
-        <div class="metrics-grid metrics-row-1">
-            <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}"
-                 data-tooltip="Total profit or loss from all completed Buy→Sell trades combined">
-                <div class="metric-label">Total Return</div>
-                <div class="metric-value">{{ "%.2f"|format(result.metrics['Total Return (%)']) }}%</div>
+            <!-- Market Bias -->
+            <div class="bias-row">
+                <span class="bias-label">Market Bias</span>
+                <span class="bias-badge">{{ result.bias }}</span>
             </div>
-            <div class="metric-box"
-                 data-tooltip="Percentage of trades that closed in profit — 50%+ beats random chance">
-                <div class="metric-label">Win Rate</div>
-                <div class="metric-value">{{ "%.1f"|format(result.metrics['Win Rate (%)']) }}%</div>
-            </div>
-            <div class="metric-box"
-                 data-tooltip="Total completed Buy→Sell round-trip trade cycles in this backtest">
-                <div class="metric-label">Trades</div>
-                <div class="metric-value">{{ result.metrics['Number of Trades'] }}</div>
-            </div>
-            <div class="metric-box"
-                 data-tooltip="Composite score: Return (40%) + Win Rate (40%) + Signal Reliability (20%) — max 100">
-                <div class="metric-label">Health</div>
-                <div class="metric-value">{{ result.health_score }}</div>
-            </div>
+            <p class="bias-info">
+            Market Bias shows whether this EMA strategy generates more buy or sell signals over time.
+            </p>
+            <p class="bias-desc {{ result.bias | lower }}">
+                {{ result.bias_description }}
+            </p>
+
         </div>
- 
-        <!-- Row 2: Advanced metrics -->
-        <div class="metrics-grid metrics-row-2">
-            <div class="metric-box adv {% if result.cagr > 0 %}profit{% else %}loss{% endif %}"
-                 data-tooltip="Compounded Annual Growth Rate — the equivalent fixed yearly return if held consistently">
-                <div class="metric-label">CAGR</div>
-                <div class="metric-value">{{ "%.1f"|format(result.cagr) }}%</div>
-            </div>
-            <div class="metric-box adv loss"
-                 data-tooltip="Largest peak-to-trough portfolio drop before recovering — lower is safer">
-                <div class="metric-label">Max Drawdown</div>
-                <div class="metric-value">{{ "%.1f"|format(result.max_drawdown) }}%</div>
-            </div>
-            <div class="metric-box adv {% if result.sharpe > 1 %}profit{% elif result.sharpe > 0 %}neutral{% else %}loss{% endif %}"
-                 data-tooltip="Risk-adjusted return per unit of volatility — above 1.0 is good, above 2.0 is excellent">
-                <div class="metric-label">Sharpe</div>
-                <div class="metric-value">{{ "%.2f"|format(result.sharpe) }}</div>
-            </div>
-            <div class="metric-box adv {% if result.best_trade > 0 %}profit{% else %}loss{% endif %}"
-                 data-tooltip="Highest single-trade return — shows the strategy's best-case upside">
-                <div class="metric-label">Best Trade</div>
-                <div class="metric-value">{{ "%.1f"|format(result.best_trade) }}%</div>
-            </div>
+        {% else %}
+        <div class="card empty-state anim">
+            <div class="empty-icon">📈</div>
+            <p class="empty-title">Ready to analyze</p>
+            <p class="empty-sub">Enter a stock symbol and hit Analyze to see EMA crossover signals, backtest results, and strategy intelligence.</p>
         </div>
-
-        <!-- Market Bias -->
-        <div class="bias-row">
-            <span class="bias-label">Market Bias</span>
-            <span class="bias-badge">{{ result.bias }}</span>
-        </div>
-        <p class="bias-info">
-        Market Bias shows whether this EMA strategy generates more buy or sell signals over time.
-        </p>
-        <p class="bias-desc {{ result.bias | lower }}">
-            {{ result.bias_description }}
-        </p>
-
+        {% endif %}
     </div>
-
-    {% else %}
-    <div class="card empty-state anim">
-        <div class="empty-icon">📈</div>
-        <p class="empty-title">Ready to analyze</p>
-        <p class="empty-sub">Enter a stock symbol and hit Analyze to see EMA crossover signals, backtest results, and strategy intelligence.</p>
-    </div>
-    {% endif %}
 
 </div><!-- end .container -->
 
@@ -307,7 +308,7 @@
         <div class="btn-group" id="compareEmaGroup">
             <button type="button" data-short="9"  data-long="21"  class="cmp-btn">9/21</button>
             <button type="button" data-short="12" data-long="26"  class="cmp-btn">12/26</button>
-            <button type="button" data-short="20" data-long="50"  class="cmp-btn active">20/50</button>
+            <button type="button" data-short="20" data-long="50"  class="cmp-btn">20/50</button>
             <button type="button" data-short="50" data-long="200" class="cmp-btn">50/200</button>
         </div>
         <div class="compare-custom-row">
@@ -331,6 +332,7 @@
         <span style="font-size:13px;color:var(--text-muted);margin-left:10px;">Running backtest…</span>
     </div>
     <div id="compareError" class="compare-error hidden"></div>
+    <div id="compareMessage" class="compare-message hidden"></div>
 </div>
 
 <!-- ── DIRECTIONAL ACCURACY ────────────────────────────────── -->
@@ -455,7 +457,6 @@
     }, { passive: true });
 })();
 </script>
-
 <!-- 2. FORM CONTROLS + BUTTON PERSISTENCE -->
 <script>
 (function() {
@@ -512,12 +513,28 @@
             document.querySelectorAll('#emaGroup button').forEach(function(x) { x.classList.remove('active'); });
         }
     });
-
-    // Loading state
-    document.getElementById('mainForm').addEventListener('submit', function() {
-        var btn = document.getElementById('analyzeBtn');
-        btn.innerHTML = '<span class="btn-spinner"></span>Analyzing…';
+    document.getElementById("mainForm").addEventListener("submit", function () {
+        
+        // 1. Disable button + show spinner
+        var btn = document.getElementById("analyzeBtn");
+        btn.innerHTML = `<span class="btn-spinner"></span>Analyzing...`;
         btn.disabled = true;
+
+        // 2. Show skeleton UI instantly
+        document.getElementById("result-container").innerHTML = `
+            <div class="skeleton-card">
+                <div class="skeleton-title"></div>
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+            </div>
+
+            <div class="skeleton-chart"></div>
+        `;
+
+        var symbol = document.getElementById("symbolInput").value;
+        document.getElementById("status-text").innerText =
+            "Analyzing " + symbol + " with EMA strategy..."
     });
 })();
 </script>
@@ -779,8 +796,11 @@
     var currentSymbol = {{ (result.symbol if result else "") | tojson | safe }};
     var currentPeriod = {{ (result.period if result else "1y") | tojson | safe }};
 
-    var selectedShort = 20;
-    var selectedLong  = 50;
+    var selectedShort = null;
+    var selectedLong  = null;
+    var comparedPairs = new Set();
+    let comparedSet = new Set();
+    let comparedList = [];
 
     // Preset button active state
     document.querySelectorAll('.cmp-btn').forEach(function(b) {
@@ -794,7 +814,28 @@
         });
     });
 
-    function runComparison(shortEma, longEma) {
+    window.addEventListener("load", function() {
+            var defaultShort = {{ result.short_ema | tojson | safe }};
+            var defaultLong  = {{ result.long_ema  | tojson | safe }};
+
+            selectedShort = defaultShort;
+            selectedLong  = defaultLong;
+
+            let key = defaultShort + "-" + defaultLong;
+
+            // 🔥 ADD DEFAULT TO SET + LIST
+            comparedSet.add(key);
+            comparedList.push({ short: defaultShort, long: defaultLong });
+
+            // 🔥 CALL API AND RENDER FIRST CARD
+            runComparison(defaultShort, defaultLong, true); 
+        });
+
+        document.querySelectorAll('.cmp-btn').forEach(function(x) {
+            x.classList.remove('active');
+        });
+
+    function runComparison(shortEma, longEma , isDefault = false) {
         var loading = document.getElementById('compareLoading');
         var results = document.getElementById('compareResults');
         var errDiv  = document.getElementById('compareError');
@@ -805,6 +846,30 @@
             alert("Enter a stock symbol first");
             return;
         }
+
+        var livePeriod = document.getElementById("periodInput").value;
+
+        if (symbolInput !== currentSymbol) {
+            comparedPairs.clear();
+            document.getElementById('compareGrid').innerHTML = '';
+            currentSymbol = symbolInput;
+        }
+
+        var key = shortEma + "-" + longEma;
+
+        var msgDiv = document.getElementById('compareMessage');
+
+        if (!isDefault && comparedSet.has(key)) {
+            document.getElementById("compareError").textContent = "Already added this EMA pair";
+            document.getElementById("compareError").classList.remove("hidden");
+            return;
+        }
+
+        if (comparedPairs.size >= 4) {
+            alert("Max 4 comparisons allowed");
+            return;
+        }
+
         loading.classList.remove('hidden');
         results.classList.add('hidden');
         errDiv.classList.add('hidden');
@@ -814,13 +879,17 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 symbol:    symbolInput,
-                period:    currentPeriod,
+                period:    livePeriod,
                 short_ema: shortEma,
                 long_ema:  longEma
             })
         })
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            if (!isDefault) {
+                comparedSet.add(key);
+                comparedList.push({ short: shortEma, long: longEma });
+            }
             loading.classList.add('hidden');
             if (d.error) {
                 errDiv.textContent = '⚠️ ' + d.error;
@@ -854,7 +923,6 @@
                 '<div class="cmp-metric"><span class="cmp-m-label">Sharpe</span><span class="cmp-m-value">' + d.sharpe.toFixed(2) + '</span></div>' +
                 '<div class="cmp-metric"><span class="cmp-m-label">Max DD</span><span class="cmp-m-value loss">' + d.max_dd.toFixed(1) + '%</span></div>' +
             '</div>';
-
         grid.appendChild(card);
         insight.textContent = '💡 ' + d.insight;
         results.classList.remove('hidden');
@@ -869,14 +937,14 @@
             selectedLong  = cLong;
             document.querySelectorAll('.cmp-btn').forEach(function(x) { x.classList.remove('active'); });
         }
-
+        if (selectedShort === null || selectedLong === null) {
+            alert("Select a preset or enter custom EMA first");
+            return;
+        }
         runComparison(selectedShort, selectedLong);
     });
 
-    // Default: run current EMA on load
-    {% if result %}
-    runComparison({{ result.short_ema }}, {{ result.long_ema }});
-    {% endif %}
+    
 })();
 </script>
 {% endif %}

@@ -105,8 +105,11 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
     data[long_col]  = calculate_ema(data["Close"], long_ema)
 
     signals = detect_crossovers(data, short_col, long_col)
-    trades  = backtest(data, signals)
-    metrics = calculate_metrics(trades)
+    INITIAL_CAPITAL = 100000  # same as your simulator input
+
+    trades, equity_curve, final_capital = backtest(data, signals, INITIAL_CAPITAL)
+
+    metrics = calculate_metrics(trades, INITIAL_CAPITAL, final_capital)
 
     # ── Detailed trades ────────────────────────────────────────
     detailed_trades = []
@@ -139,11 +142,21 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
     prices_list             = data["Close"].tolist()
     start_dt                = data.index[0].to_pydatetime()
     end_dt                  = data.index[-1].to_pydatetime()
-    cagr                    = calculate_cagr(metrics["Total Return (%)"], start_dt, end_dt)
+    initial_capital         = INITIAL_CAPITAL
+    portfolio = {
+        "history": equity_curve,
+        "final": final_capital,
+        "total_gain": final_capital - initial_capital,
+        "total_gain_pct": ((final_capital - initial_capital) / initial_capital) * 100
+    }
+    cagr = calculate_cagr(
+        portfolio["total_gain_pct"],
+        start_dt,
+        end_dt
+    )
     max_drawdown            = calculate_max_drawdown(prices_list)
     sharpe                  = calculate_sharpe(detailed_trades)
     best_trade, worst_trade = get_best_worst_trade(detailed_trades)
-    portfolio               = calculate_portfolio_growth(detailed_trades, 100_000)
 
     # ── Signal analysis + intelligence table ──────────────────
     analysis  = summarize_results(signal_outcome_analysis(data, signals))
@@ -523,6 +536,7 @@ def api_compare():
             "cagr":         res["cagr"],
             "sharpe":       res["sharpe"],
             "max_dd":       res["max_drawdown"],
+            "final_capital": res["portfolio"]["final"],
             "insight":      EMA_INSIGHTS.get(
                                 key,
                                 f"Custom EMA {key} — results vary by stock and market regime."

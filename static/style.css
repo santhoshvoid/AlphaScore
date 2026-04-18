@@ -964,3 +964,40 @@ body.dark .export-btn {
         padding: 5px 10px;
     }
 }
+
+.skeleton-card,
+.skeleton-chart {
+    position: relative;
+    overflow: hidden;
+    background: #1e293b;
+    border-radius: 12px;
+}
+
+.skeleton-card::after,
+.skeleton-chart::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -150%;
+    height: 100%;
+    width: 150%;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255,255,255,0.08),
+        transparent
+    );
+    animation: shimmer 1.2s infinite;
+}
+
+@keyframes shimmer {
+    100% {
+        left: 150%;
+    }
+}
+
+.compare-message {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #f59e0b;
+}
