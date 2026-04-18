@@ -118,6 +118,16 @@
 
             <h2>📊 Performance</h2>
 
+
+            <!-- 🔥 ML PREDICTION BOX (ADD HERE) -->
+            {% if result.ml_prediction %}
+            <div class="prediction-box">
+                <h3>🤖 ML Prediction</h3>
+                <p>{{ result.ml_prediction.prediction }}</p>
+                <p>Confidence: {{ result.ml_prediction.confidence }}%</p>
+            </div>
+            {% endif %}
+            
             <!-- Row 1: Core metrics -->
             <div class="metrics-grid metrics-row-1">
                 <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}"

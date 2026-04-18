@@ -1001,3 +1001,21 @@ body.dark .export-btn {
     font-size: 13px;
     color: #f59e0b;
 }
+.prediction-box {
+    margin: 12px 0 18px 0;
+    padding: 14px;
+    border-radius: 12px;
+    background: rgba(108, 92, 231, 0.08);
+    border: 1px solid rgba(108, 92, 231, 0.2);
+}
+
+.prediction-box h3 {
+    margin: 0 0 6px 0;
+    font-size: 14px;
+    color: #6c5ce7;
+}
+
+.prediction-box p {
+    margin: 2px 0;
+    font-size: 13px;
+}

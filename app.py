@@ -25,7 +25,7 @@ All existing features preserved:
   portfolio growth · watchlist chips · CSV export ·
   strategy comparison · /api/watchlist · tooltips · mobile layout
 """
-
+from src.ml_model import predict_latest
 from flask import Flask, render_template, request, jsonify, Response
 import threading
 import csv
@@ -108,9 +108,12 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
     INITIAL_CAPITAL = 100000  # same as your simulator input
 
     trades, equity_curve, final_capital = backtest(data, signals, INITIAL_CAPITAL)
-
+    
     metrics = calculate_metrics(trades, INITIAL_CAPITAL, final_capital)
-
+    ml_result = predict_latest(data) or {
+        "prediction": "Unavailable",
+        "confidence": 0
+    }
     # ── Detailed trades ────────────────────────────────────────
     detailed_trades = []
     i = 0
@@ -198,6 +201,7 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         "best_trade":       best_trade,
         "worst_trade":      worst_trade,
         "portfolio":        portfolio,
+        "ml_prediction":    ml_result,
     }
 
     return result, short_col, long_col
