@@ -639,3 +639,328 @@ button:not(.theme-btn):not(.analyze-btn):not(.chart-btn):not(.cmp-run-btn):not(.
     padding:8px 14px; background:var(--accent);
     color:white; border:none; border-radius:8px; cursor:pointer;
 }
+
+/* ================================================================
+   METRIC BOX TOOLTIPS  —  append this block to the end of style.css
+   ================================================================ */
+
+/* Ensure parent containers allow overflow for the tooltip */
+.metrics-grid,
+.metrics-row-1,
+.metrics-row-2 {
+    overflow: visible;
+}
+
+.perf-card {
+    overflow: visible;
+}
+
+/* Tooltip trigger: any metric-box that has data-tooltip */
+.metric-box[data-tooltip] {
+    position: relative;
+    cursor: default;
+}
+
+/* The tooltip bubble */
+.metric-box[data-tooltip]::after {
+    content: attr(data-tooltip);
+
+    /* Positioning */
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+
+    /* Size & layout */
+    width: max-content;
+    max-width: 200px;
+    white-space: normal;
+    text-align: center;
+
+    /* Appearance */
+    background: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 9px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    padding: 8px 12px;
+
+    /* Typography — reset all inherited uppercase/mono styles */
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    line-height: 1.55;
+    color: #cbd5e1;
+
+    /* Transition */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 1000;
+}
+
+/* The small arrow below the bubble */
+.metric-box[data-tooltip]::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+
+    border: 5px solid transparent;
+    border-top-color: #0f172a;
+
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+    z-index: 1001;
+}
+
+/* Show on hover */
+.metric-box[data-tooltip]:hover::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+.metric-box[data-tooltip]:hover::before {
+    opacity: 1;
+}
+
+/* Light mode — lighter bubble */
+body:not(.dark) .metric-box[data-tooltip]::after {
+    background: #1e293b;
+    border-color: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+}
+
+body:not(.dark) .metric-box[data-tooltip]::before {
+    border-top-color: #1e293b;
+}
+
+/* ================================================================
+   APPEND THIS ENTIRE BLOCK TO THE BOTTOM OF style.css
+   Covers: Metric tooltips · Watchlist chips · Export buttons · Mobile
+   ================================================================ */
+
+
+/* ── METRIC TOOLTIPS ─────────────────────────────────────────── */
+.metrics-grid, .metrics-row-1, .metrics-row-2, .perf-card {
+    overflow: visible;
+}
+
+.metric-box[data-tooltip] { position: relative; cursor: default; }
+
+.metric-box[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    width: max-content;
+    max-width: 210px;
+    white-space: normal;
+    text-align: center;
+    background: #0f172a;
+    color: #cbd5e1;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 9px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    padding: 8px 12px;
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    line-height: 1.55;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 1000;
+}
+
+.metric-box[data-tooltip]::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #0f172a;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+    z-index: 1001;
+}
+
+.metric-box[data-tooltip]:hover::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+.metric-box[data-tooltip]:hover::before { opacity: 1; }
+
+
+/* ── WATCHLIST / RECENT CHIPS ────────────────────────────────── */
+.recent-section {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+
+.recent-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-xmuted);
+    display: block;
+    margin-bottom: 8px;
+}
+
+.recent-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.recent-chip {
+    padding: 4px 11px !important;
+    width: auto !important;
+    font-size: 11px !important;
+    font-weight: 600;
+    font-family: var(--font-mono) !important;
+    background: var(--accent-glow) !important;
+    border: 1px solid rgba(108,92,231,0.25) !important;
+    border-radius: 20px;
+    color: var(--accent) !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    letter-spacing: 0.3px;
+}
+
+.recent-chip:hover {
+    background: var(--accent) !important;
+    color: white !important;
+    border-color: transparent !important;
+    transform: none !important;
+    box-shadow: 0 2px 10px var(--accent-glow);
+}
+
+body.dark .recent-chip {
+    color: var(--accent-2) !important;
+    border-color: rgba(162,155,254,0.25) !important;
+}
+
+body.dark .recent-chip:hover {
+    background: var(--accent) !important;
+    color: white !important;
+}
+
+
+/* ── EXPORT BUTTON ───────────────────────────────────────────── */
+.export-btn {
+    padding: 3px 10px !important;
+    width: auto !important;
+    font-size: 10.5px !important;
+    font-weight: 600;
+    font-family: var(--font-mono) !important;
+    background: rgba(108,92,231,0.08) !important;
+    border: 1px solid rgba(108,92,231,0.2) !important;
+    border-radius: 6px;
+    color: var(--accent) !important;
+    cursor: pointer;
+    margin-left: 10px;
+    vertical-align: middle;
+    transition: all 0.15s ease;
+}
+
+.export-btn:hover {
+    background: var(--accent) !important;
+    color: white !important;
+    border-color: transparent !important;
+    transform: none !important;
+}
+
+body.dark .export-btn {
+    color: var(--accent-2) !important;
+    border-color: rgba(162,155,254,0.2) !important;
+}
+
+
+/* ── MOBILE RESPONSIVE  (Feature 5) ─────────────────────────── */
+
+/* ≤ 900px: stack the two-column sidebar grid */
+@media (max-width: 900px) {
+    body {
+        padding: 12px 14px 48px;
+    }
+
+    .container {
+        grid-template-columns: 1fr;
+        gap: 14px;
+    }
+
+    .full-width {
+        grid-column: span 1;
+    }
+
+    .metrics-grid.metrics-row-1,
+    .metrics-grid.metrics-row-2 {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .accuracy-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .portfolio-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .compare-controls {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    #stockChart    { height: 320px !important; max-height: 320px; }
+    #portfolioChart { height: 220px !important; max-height: 220px; }
+
+    .chart-hint { display: none; }
+
+    .navbar { height: auto; padding: 12px 16px; }
+
+    .portfolio-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+}
+
+/* ≤ 520px: even smaller screens */
+@media (max-width: 520px) {
+    .metrics-grid.metrics-row-1,
+    .metrics-grid.metrics-row-2,
+    .accuracy-grid,
+    .portfolio-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .compare-custom-row {
+        flex-wrap: wrap;
+    }
+
+    .cmp-metrics {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    table { font-size: 11px; }
+    td, th { padding: 6px 8px; }
+
+    .config-bar {
+        font-size: 10px;
+        padding: 5px 10px;
+    }
+}

@@ -93,6 +93,19 @@
                 </div>
 
                 <button type="submit" class="analyze-btn" id="analyzeBtn">Analyze</button>
+                {% if watchlist %}
+                <div class="recent-section">
+                    <span class="recent-label">Recently Analyzed</span>
+                    <div class="recent-chips" id="recentChips">
+                        {% for item in watchlist %}
+                        <button type="button" class="recent-chip"
+                                data-symbol="{{ item.symbol }}">
+                            {{ item.symbol | replace('.NS','') }}
+                        </button>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
             </div>
 
         </form>
@@ -106,39 +119,47 @@
 
         <!-- Row 1: Core metrics -->
         <div class="metrics-grid metrics-row-1">
-            <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}">
+            <div class="metric-box {% if result.metrics['Total Return (%)'] > 0 %}profit{% else %}loss{% endif %}"
+                 data-tooltip="Total profit or loss from all completed Buy→Sell trades combined">
                 <div class="metric-label">Total Return</div>
                 <div class="metric-value">{{ "%.2f"|format(result.metrics['Total Return (%)']) }}%</div>
             </div>
-            <div class="metric-box">
+            <div class="metric-box"
+                 data-tooltip="Percentage of trades that closed in profit — 50%+ beats random chance">
                 <div class="metric-label">Win Rate</div>
                 <div class="metric-value">{{ "%.1f"|format(result.metrics['Win Rate (%)']) }}%</div>
             </div>
-            <div class="metric-box">
+            <div class="metric-box"
+                 data-tooltip="Total completed Buy→Sell round-trip trade cycles in this backtest">
                 <div class="metric-label">Trades</div>
                 <div class="metric-value">{{ result.metrics['Number of Trades'] }}</div>
             </div>
-            <div class="metric-box">
+            <div class="metric-box"
+                 data-tooltip="Composite score: Return (40%) + Win Rate (40%) + Signal Reliability (20%) — max 100">
                 <div class="metric-label">Health</div>
                 <div class="metric-value">{{ result.health_score }}</div>
             </div>
         </div>
-
+ 
         <!-- Row 2: Advanced metrics -->
         <div class="metrics-grid metrics-row-2">
-            <div class="metric-box adv {% if result.cagr > 0 %}profit{% else %}loss{% endif %}">
+            <div class="metric-box adv {% if result.cagr > 0 %}profit{% else %}loss{% endif %}"
+                 data-tooltip="Compounded Annual Growth Rate — the equivalent fixed yearly return if held consistently">
                 <div class="metric-label">CAGR</div>
                 <div class="metric-value">{{ "%.1f"|format(result.cagr) }}%</div>
             </div>
-            <div class="metric-box adv loss">
+            <div class="metric-box adv loss"
+                 data-tooltip="Largest peak-to-trough portfolio drop before recovering — lower is safer">
                 <div class="metric-label">Max Drawdown</div>
                 <div class="metric-value">{{ "%.1f"|format(result.max_drawdown) }}%</div>
             </div>
-            <div class="metric-box adv {% if result.sharpe > 1 %}profit{% elif result.sharpe > 0 %}neutral{% else %}loss{% endif %}">
+            <div class="metric-box adv {% if result.sharpe > 1 %}profit{% elif result.sharpe > 0 %}neutral{% else %}loss{% endif %}"
+                 data-tooltip="Risk-adjusted return per unit of volatility — above 1.0 is good, above 2.0 is excellent">
                 <div class="metric-label">Sharpe</div>
                 <div class="metric-value">{{ "%.2f"|format(result.sharpe) }}</div>
             </div>
-            <div class="metric-box adv {% if result.best_trade > 0 %}profit{% else %}loss{% endif %}">
+            <div class="metric-box adv {% if result.best_trade > 0 %}profit{% else %}loss{% endif %}"
+                 data-tooltip="Highest single-trade return — shows the strategy's best-case upside">
                 <div class="metric-label">Best Trade</div>
                 <div class="metric-value">{{ "%.1f"|format(result.best_trade) }}%</div>
             </div>
@@ -237,7 +258,9 @@
 
     {% if result.detailed_trades %}
     <details>
-        <summary>📂 View {{ result.detailed_trades|length }} Trades</summary>
+        <summary>📂 View {{ result.detailed_trades|length }} Trades
+            <button type="button" class="export-btn" id="exportTradesBtn" title="Download as CSV">⬇ CSV</button>
+        </summary>
         <p style="font-size:12px; color:var(--text-xmuted); margin:10px 0 12px;">
             Trades are generated when EMA short crosses EMA long:<br>
             • Golden Cross → Buy signal<br>
@@ -347,7 +370,9 @@
 
     {% if result.table %}
     <details>
-        <summary>📂 View {{ result.table|length }} Signals</summary>
+        <summary>📂 View {{ result.table|length }} Signals
+            <button type="button" class="export-btn" id="exportSignalsBtn" title="Download as CSV">⬇ CSV</button>
+        </summary>
         <p style="font-size:12px; color:var(--text-xmuted); margin:10px 0 12px;">
             Each row shows how strong and reliable a signal was, along with future returns after the signal.<br>
             (Strength = crossover momentum · Confidence = historical success rate · Label = overall signal quality)
@@ -855,6 +880,74 @@
 })();
 </script>
 {% endif %}
-
+<script>
+(function() {
+ 
+    // ── Watchlist chip click → fill symbol + submit ────────
+    document.querySelectorAll('.recent-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+            var sym = chip.dataset.symbol;
+            var inp = document.getElementById('symbolInput');
+            if (inp) {
+                inp.value = sym;
+                // Auto-submit
+                document.getElementById('mainForm').submit();
+            }
+        });
+    });
+ 
+    // ── Generic client-side table → CSV ───────────────────
+    function tableToCSV(tableEl) {
+        var rows = tableEl.querySelectorAll('tr');
+        return Array.from(rows).map(function(row) {
+            return Array.from(row.querySelectorAll('th, td'))
+                .map(function(cell) {
+                    // Strip any nested buttons/spans, just get text
+                    return '"' + cell.textContent.trim().replace(/"/g, '""') + '"';
+                })
+                .join(',');
+        }).join('\n');
+    }
+ 
+    function downloadCSV(csv, filename) {
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var url  = URL.createObjectURL(blob);
+        var a    = document.createElement('a');
+        a.href     = url;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+ 
+    // ── Trades CSV export ──────────────────────────────────
+    var exportTradesBtn = document.getElementById('exportTradesBtn');
+    if (exportTradesBtn) {
+        exportTradesBtn.addEventListener('click', function(e) {
+            e.stopPropagation(); // don't open/close the <details>
+            // Find the table inside the Trade History card
+            var table = exportTradesBtn.closest('details').querySelector('table');
+            if (!table) return;
+            var sym = document.getElementById('symbolInput').value || 'stock';
+            downloadCSV(tableToCSV(table), 'trades_' + sym + '.csv');
+        });
+    }
+ 
+    // ── Signals CSV export ─────────────────────────────────
+    var exportSignalsBtn = document.getElementById('exportSignalsBtn');
+    if (exportSignalsBtn) {
+        exportSignalsBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var table = exportSignalsBtn.closest('details').querySelector('table');
+            if (!table) return;
+            var sym = document.getElementById('symbolInput').value || 'stock';
+            downloadCSV(tableToCSV(table), 'signals_' + sym + '.csv');
+        });
+    }
+ 
+})();
+</script>
 </body>
 </html>

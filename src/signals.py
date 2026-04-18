@@ -1,20 +1,28 @@
-
 def detect_crossovers(data, short_col, long_col):
-    signals = []
+    signals = data.copy()
 
-    for i in range(1, len(data)):
-        prev_short = data[short_col].iloc[i-1]
-        prev_long = data[long_col].iloc[i-1]
+    signals["prev_short"] = signals[short_col].shift(1)
+    signals["prev_long"]  = signals[long_col].shift(1)
 
-        curr_short = data[short_col].iloc[i]
-        curr_long = data[long_col].iloc[i]
+    signals["signal"] = None
 
-        # 🟢 Golden Cross → BUY
-        if prev_short <= prev_long and curr_short > curr_long:
-            signals.append(("BUY", data.index[i]))
+    signals.loc[
+        (signals["prev_short"] <= signals["prev_long"]) &
+        (signals[short_col] > signals[long_col]),
+        "signal"
+    ] = "BUY"
 
-        # 🔴 Death Cross → SELL
-        elif prev_short >= prev_long and curr_short < curr_long:
-            signals.append(("SELL", data.index[i]))
+    signals.loc[
+        (signals["prev_short"] >= signals["prev_long"]) &
+        (signals[short_col] < signals[long_col]),
+        "signal"
+    ] = "SELL"
 
-    return signals
+    # 🔥 Convert back to SAME FORMAT your app expects
+    result = []
+
+    for idx, row in signals.iterrows():
+        if row["signal"] is not None:
+            result.append((row["signal"], idx))
+
+    return result
