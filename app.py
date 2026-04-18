@@ -114,6 +114,13 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         "prediction": "Unavailable",
         "confidence": 0
     }
+    # ── ML SCORE (convert to numeric) ─────────────
+    ml_conf = ml_result["confidence"] / 100
+
+    if "Bullish" in ml_result["prediction"]:
+        ml_score = ml_conf
+    else:
+        ml_score = -ml_conf
     # ── Detailed trades ────────────────────────────────────────
     detailed_trades = []
     i = 0
@@ -184,21 +191,100 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         bias = "Neutral ⚖️"
         bias_desc = "Buy and sell signals are balanced — no clear trend advantage."
 
-    # ── ML prediction already exists
-    ml_result = predict_latest(data) or {
-        "prediction": "Unavailable",
-        "confidence": 0
-    }
 
     # ── TEMP SENTIMENT (placeholder)
     sentiment_result = {
         "prediction": "Neutral 😐",
         "confidence": 50
     }
+    # ── SENTIMENT SCORE ──────────────────────────
+    sent_conf = sentiment_result["confidence"] / 100
 
-    # ── FINAL DECISION (basic version)
-    final_prediction = ml_result["prediction"]
-    final_confidence = ml_result["confidence"]
+    if "Bullish" in sentiment_result["prediction"]:
+        sentiment_score = sent_conf
+    elif "Bearish" in sentiment_result["prediction"]:
+        sentiment_score = -sent_conf
+    else:
+        sentiment_score = 0
+
+    # ── EMA TREND SCORE ──────────────────────────
+    latest = data.iloc[-1]
+
+    latest_trend = latest[short_col] - latest[long_col]
+
+    # normalize (important)
+    price = latest["Close"]
+
+    ema_score = (latest_trend / price) * 10
+    ema_score = max(min(ema_score, 1), -1)
+
+    # ── RELIABILITY WEIGHTS ───────────────────────
+
+    # ML reliability (based on its own confidence)
+    ml_weight = 0.5 * ml_conf
+
+    # EMA reliability (stronger trend = more reliable)
+    ema_strength = abs(ema_score)
+    ema_weight = 0.3 * ema_strength
+
+    # Sentiment reliability (later will be FinBERT)
+    sent_weight = 0.2 * sent_conf
+
+    # normalize weights (VERY IMPORTANT)
+    total_weight = ml_weight + ema_weight + sent_weight
+
+    if total_weight == 0:
+        total_weight = 1  # avoid divide by zero
+
+    ml_weight /= total_weight
+    ema_weight /= total_weight
+    sent_weight /= total_weight
+
+    # ── FINAL DECISION ENGINE (v2) ───────────────
+    final_score = (
+        ml_weight * ml_score +
+        ema_weight * ema_score +
+        sent_weight * sentiment_score
+    )
+    # ── DISAGREEMENT PENALTY ─────────────────────
+
+    disagreement = 0
+
+    # ML vs EMA
+    if ml_score * ema_score < 0:
+        disagreement += 0.15
+
+    # ML vs Sentiment
+    if ml_score * sentiment_score < 0:
+        disagreement += 0.10
+
+    # EMA vs Sentiment
+    if ema_score * sentiment_score < 0:
+        disagreement += 0.05
+
+    # apply penalty
+    final_score *= (1 - disagreement)
+
+    if final_score > 0.1:
+        final_prediction = "Bullish 📈"
+    elif final_score < -0.1:
+        final_prediction = "Bearish 📉"
+    else:
+        final_prediction = "Neutral ⚖️"
+
+
+    # ── CONFIDENCE CALIBRATION ───────────────────
+
+    confidence = abs(final_score)
+
+    # smooth scaling
+    confidence = confidence ** 0.7
+
+    # penalize low agreement
+    confidence *= (1 - disagreement)
+
+    final_confidence = round(confidence * 100, 2)
+
 
     result = {
         "metrics":          metrics,
@@ -218,7 +304,6 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         "worst_trade":      worst_trade,
         "portfolio":        portfolio,
         "ml_prediction":    ml_result,
-        "ml_prediction":        ml_result,
         "sentiment_prediction": sentiment_result,
         "final_prediction": {
             "prediction": final_prediction,
@@ -526,10 +611,10 @@ def export_signals():
 # ─────────────────────────────────────────────
 
 EMA_INSIGHTS = {
-    "9/21":   "Ultra short-term — very fast signals, high noise. Best for active swing traders who can monitor daily.",
-    "12/26":  "Classic MACD basis — balanced sensitivity. Widely used in momentum strategies worldwide.",
-    "20/50":  "Medium-term positional — filters day-to-day noise. Good balance of timeliness and reliability.",
-    "50/200": "The legendary Golden/Death Cross — fewest signals but highest conviction. Suits long-term investors.",
+    "9/21":   "Ultra short-term -> very fast signals, high noise. Best for active swing traders who can monitor daily.",
+    "12/26":  "Classic MACD basis -> balanced sensitivity. Widely used in momentum strategies worldwide.",
+    "20/50":  "Medium-term positional -> filters day-to-day noise. Good balance of timeliness and reliability.",
+    "50/200": "The legendary Golden/Death Cross -> fewest signals but highest conviction. Suits long-term investors.",
 }
 
 
