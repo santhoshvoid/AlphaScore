@@ -1019,3 +1019,71 @@ body.dark .export-btn {
     margin: 2px 0;
     font-size: 13px;
 }
+
+.multi-prediction {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Technical → Sentiment (¼ gap) */
+.multi-prediction .prediction-box:nth-child(1) {
+    margin-bottom: 3px;
+}
+
+/* Sentiment → Final (½ gap) */
+.multi-prediction .prediction-box:nth-child(2) {
+    margin-bottom: 6px;
+}
+
+.prediction-box {
+    padding: 14px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+}
+
+.prediction-box {
+    padding: 10px 12px;   /* reduced from ~14+ */
+    border-radius: 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+}
+
+.prediction-box h3 {
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+.prediction-box p {
+    margin: 2px 0;
+    font-size: 12px;
+}
+
+.final-box {
+    border: 1px solid var(--accent);
+    background: rgba(108,92,231,0.08);
+}
+
+.pred-desc {
+    font-size: 10px;                 /* smaller */
+    color: rgba(255, 255, 255, 0.45); /* lighter shade */
+    margin-bottom: 4px;              /* tighter */
+    line-height: 1.3;
+    font-weight: 400;
+}
+
+.metric-box {
+    padding: 10px;
+}
+
+.metric-label {
+    font-size: 10px;
+}
+
+.metric-value {
+    font-size: 16px;
+}
+
+.perf-card {
+    padding: 14px !important;
+}

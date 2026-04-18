@@ -184,6 +184,22 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         bias = "Neutral ⚖️"
         bias_desc = "Buy and sell signals are balanced — no clear trend advantage."
 
+    # ── ML prediction already exists
+    ml_result = predict_latest(data) or {
+        "prediction": "Unavailable",
+        "confidence": 0
+    }
+
+    # ── TEMP SENTIMENT (placeholder)
+    sentiment_result = {
+        "prediction": "Neutral 😐",
+        "confidence": 50
+    }
+
+    # ── FINAL DECISION (basic version)
+    final_prediction = ml_result["prediction"]
+    final_confidence = ml_result["confidence"]
+
     result = {
         "metrics":          metrics,
         "analysis":         analysis,
@@ -202,6 +218,12 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
         "worst_trade":      worst_trade,
         "portfolio":        portfolio,
         "ml_prediction":    ml_result,
+        "ml_prediction":        ml_result,
+        "sentiment_prediction": sentiment_result,
+        "final_prediction": {
+            "prediction": final_prediction,
+            "confidence": final_confidence
+        }
     }
 
     return result, short_col, long_col
