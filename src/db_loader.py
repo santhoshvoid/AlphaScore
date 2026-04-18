@@ -239,7 +239,7 @@ def save_metrics(symbol: str, metrics: dict, short_ema: int, long_ema: int):
         print(f"⚠️ save_metrics error: {e}")
 
 
-def get_cached_metrics(symbol: str, short_ema: int, long_ema: int):
+def load_metrics(symbol: str, short_ema: int, long_ema: int):
     """Retrieve previously saved metrics for a symbol+EMA combo."""
     try:
         conn = get_connection()
@@ -263,5 +263,49 @@ def get_cached_metrics(symbol: str, short_ema: int, long_ema: int):
             "max_drawdown": row[3],
         }
     except Exception as e:
-        print(f"⚠️ get_cached_metrics error: {e}")
+        print(f"⚠️ load_metrics error: {e}")
         return None
+    
+def signals_exist(symbol, short_ema, long_ema):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT 1 FROM signals
+            WHERE symbol=%s AND ema_short=%s AND ema_long=%s
+            LIMIT 1
+        """, (symbol, short_ema, long_ema))
+
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        return row is not None
+
+    except Exception as e:
+        print(f"⚠️ signals_exist error: {e}")
+        return False
+    
+def trades_exist(symbol):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT 1 FROM trades
+            WHERE symbol=%s
+            LIMIT 1
+        """, (symbol,))
+
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        return row is not None
+
+    except Exception as e:
+        print(f"⚠️ trades_exist error: {e}")
+        return False

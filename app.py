@@ -1,17 +1,35 @@
 """
-app.py  —  AlphaCross Flask backend
-New in this version:
-  - load_price_data now receives the period (Feature 1)
-  - save_stock() called after every analysis (Feature 2 — stocks table)
-  - /api/watchlist  GET  endpoint (Feature 4)
-  - /api/export/trades and /api/export/signals  GET  endpoints (Feature 6)
+app.py  —  AlphaCross Flask backend  (clean architecture v2)
+
+Architecture fix summary
+────────────────────────
+BEFORE  (buggy):
+  • store_price_data ran in background thread  → race condition: next
+    request arrived before save finished → DB was still empty → yfinance
+    called again every time
+  • /api/compare called run_strategy() → triggered full API fetch + DB
+    save on every "Compare" click → duplicate writes, multiple API calls
+  • Export endpoints also called run_strategy() → same problem
+
+AFTER   (clean):
+  • Price data is saved SYNCHRONOUSLY on first fetch.  Signals/trades/
+    metrics are saved asynchronously (they're fast and non-critical for
+    the next request).
+  • _compute_strategy() is a pure function — EMAs → signals → metrics.
+    No DB reads or writes. Called by both run_strategy and compare.
+  • compare_strategy() is READ-ONLY — loads price data from DB (fast),
+    calls _compute_strategy, returns metrics. Never writes to DB.
+  • A simple _SAVING_NOW set prevents duplicate concurrent saves.
+
+All existing features preserved:
+  portfolio growth · watchlist chips · CSV export ·
+  strategy comparison · /api/watchlist · tooltips · mobile layout
 """
 
 from flask import Flask, render_template, request, jsonify, Response
 import threading
 import csv
 import io
-
 from src.data_fetch import get_stock_data, store_price_data
 from src.indicators import calculate_ema
 from src.signals import detect_crossovers
@@ -32,16 +50,23 @@ from src.db_loader import (
     save_signals,
     save_trades,
     save_metrics,
+    load_metrics,
+    signals_exist,
+    trades_exist
 )
+_LOADING = set()
 
 app = Flask(__name__)
+
+# ── Global save-lock: prevents duplicate concurrent DB writes ────
+_SAVING_NOW: set = set()
 
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
-def format_period(user_input):
+def format_period(user_input: str) -> str:
     user_input = user_input.lower().strip().replace(" ", "")
     if user_input == "max":
         return "max"
@@ -64,38 +89,15 @@ def format_period(user_input):
 
 
 # ─────────────────────────────────────────────
-# CORE STRATEGY RUNNER
+# PURE COMPUTE  (no DB reads or writes)
 # ─────────────────────────────────────────────
 
-def run_strategy(symbol, period, short_ema, long_ema):
+def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
     """
-    Full pipeline: data → EMAs → signals → backtest → advanced metrics → DB save.
-    Returns (result_dict, data_df, short_col, long_col).
+    Pure computation layer — EMAs → signals → backtest → metrics.
+    Takes a price DataFrame, returns (result_dict, short_col, long_col).
+    No database interaction whatsoever.
     """
-
-    # ── 1. Price data (DB cache → yfinance fallback) ──────────
-    # Pass period so DB only returns rows that match the requested date range
-    data = load_price_data(symbol, period)
-
-    if data is not None:
-        print(f"⚡ [{symbol}] Loaded from DB (period={period})")
-    else:
-        print(f"📡 [{symbol}] Fetching from yfinance (period={period})…")
-        data = get_stock_data(symbol, period)
-        if data is not None:
-            threading.Thread(
-                target=store_price_data,
-                args=(symbol, data),
-                daemon=True
-            ).start()
-
-    if data is None or data.empty:
-        raise ValueError(
-            f"No data found for '{symbol}'. "
-            "Please enter a valid NSE symbol e.g. RELIANCE.NS or TCS.NS."
-        )
-
-    # ── 2. Indicators + signals + basic backtest ──────────────
     short_col = f"EMA{short_ema}"
     long_col  = f"EMA{long_ema}"
 
@@ -106,7 +108,7 @@ def run_strategy(symbol, period, short_ema, long_ema):
     trades  = backtest(data, signals)
     metrics = calculate_metrics(trades)
 
-    # ── 3. Detailed trades ─────────────────────────────────────
+    # ── Detailed trades ────────────────────────────────────────
     detailed_trades = []
     i = 0
     while i < len(signals) - 1:
@@ -117,7 +119,7 @@ def run_strategy(symbol, period, short_ema, long_ema):
             sell_price = float(data.at[d2, "Close"])
             ret        = ((sell_price - buy_price) / buy_price) * 100
             quality    = (
-                "Big Win"   if ret > 5
+                "Big Win"    if ret > 5
                 else "Small Win" if ret > 0
                 else "Loss"
             )
@@ -133,78 +135,49 @@ def run_strategy(symbol, period, short_ema, long_ema):
         else:
             i += 1
 
-    # ── 4. Advanced metrics ────────────────────────────────────
-    prices_list = data["Close"].tolist()
-    start_dt    = data.index[0].to_pydatetime()
-    end_dt      = data.index[-1].to_pydatetime()
-
+    # ── Advanced metrics ───────────────────────────────────────
+    prices_list             = data["Close"].tolist()
+    start_dt                = data.index[0].to_pydatetime()
+    end_dt                  = data.index[-1].to_pydatetime()
     cagr                    = calculate_cagr(metrics["Total Return (%)"], start_dt, end_dt)
     max_drawdown            = calculate_max_drawdown(prices_list)
     sharpe                  = calculate_sharpe(detailed_trades)
     best_trade, worst_trade = get_best_worst_trade(detailed_trades)
     portfolio               = calculate_portfolio_growth(detailed_trades, 100_000)
 
-    # ── 5. Signal analysis + table ─────────────────────────────
-    analysis = summarize_results(signal_outcome_analysis(data, signals))
-    table    = build_signal_table(data, signals, short_col, long_col)
+    # ── Signal analysis + intelligence table ──────────────────
+    analysis  = summarize_results(signal_outcome_analysis(data, signals))
+    table     = build_signal_table(data, signals, short_col, long_col)
+    avg_conf  = sum(r["Confidence"] for r in table) / len(table) if table else 0
 
-    avg_conf = sum(r["Confidence"] for r in table) / len(table) if table else 0
-    health_score = round(
-        max(0, min(100,
-            metrics["Total Return (%)"] * 0.4
-            + metrics["Win Rate (%)"]   * 0.4
-            + avg_conf                  * 0.2
-        )), 2
-    )
+    health_score = round(max(0, min(100,
+        metrics["Total Return (%)"] * 0.4
+        + metrics["Win Rate (%)"]   * 0.4
+        + avg_conf                  * 0.2
+    )), 2)
 
-    # ── 6. Market bias ──────────────────────────────────────────
+    # ── Market bias ────────────────────────────────────────────
     tr = metrics["Total Return (%)"]
     if tr > 2:
-        bias, bias_description = (
-            "Bullish Bias 📈",
-            "More buy signals than sell signals — strategy favours upward trends."
-        )
+        bias = "Bullish Bias 📈"
+        bias_desc = "More buy signals than sell signals — strategy favours upward trends."
     elif tr < -2:
-        bias, bias_description = (
-            "Bearish Bias 📉",
-            "More sell signals than buy signals — strategy favours downward trends."
-        )
+        bias = "Bearish Bias 📉"
+        bias_desc = "More sell signals than buy signals — strategy favours downward trends."
     else:
-        bias, bias_description = (
-            "Neutral ⚖️",
-            "Buy and sell signals are balanced — no clear trend advantage."
-        )
+        bias = "Neutral ⚖️"
+        bias_desc = "Buy and sell signals are balanced — no clear trend advantage."
 
-    # ── 7. Background DB save (non-blocking) ───────────────────
-    _sig_copy  = list(signals)
-    _trd_copy  = list(detailed_trades)
-    _met_db    = {**metrics, "Sharpe": sharpe, "Max Drawdown": max_drawdown}
-
-    def _save():
-        try:
-            save_stock(symbol)                                  # stocks table
-            save_signals(symbol, _sig_copy, short_ema, long_ema)
-            save_trades(symbol, _trd_copy)
-            save_metrics(symbol, _met_db, short_ema, long_ema)
-            print(f"✅ [{symbol}] Saved to DB")
-        except Exception as exc:
-            print(f"⚠️ DB save failed (non-critical): {exc}")
-
-    threading.Thread(target=_save, daemon=True).start()
-
-    # ── 8. Result dict ─────────────────────────────────────────
-    return {
+    result = {
         "metrics":          metrics,
         "analysis":         analysis,
         "table":            table,
         "detailed_trades":  detailed_trades,
-        "symbol":           symbol,
-        "period":           period,
         "short_ema":        short_ema,
         "long_ema":         long_ema,
         "health_score":     health_score,
         "bias":             bias,
-        "bias_description": bias_description,
+        "bias_description": bias_desc,
         "signals":          signals,
         "cagr":             cagr,
         "max_drawdown":     max_drawdown,
@@ -212,7 +185,145 @@ def run_strategy(symbol, period, short_ema, long_ema):
         "best_trade":       best_trade,
         "worst_trade":      worst_trade,
         "portfolio":        portfolio,
-    }, data, short_col, long_col
+    }
+
+    return result, short_col, long_col
+
+
+# ─────────────────────────────────────────────
+# FULL STRATEGY RUNNER  (main route)
+# ─────────────────────────────────────────────
+
+def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tuple:
+    """
+    Full pipeline used by the main / route:
+      1. Load price data from DB (instant)
+         → if not found: fetch from yfinance then SAVE SYNCHRONOUSLY
+            (this guarantees the NEXT request will always hit the DB)
+      2. _compute_strategy() — pure compute
+      3. Save signals/trades/metrics asynchronously (non-critical for speed)
+    Returns (result_dict, data_df, short_col, long_col).
+    """
+
+    # ── 1. Price data ──────────────────────────────────────────
+    data = load_price_data(symbol, period)
+
+    if data is not None and not data.empty:
+        print(f"⚡ [{symbol}] Loaded from DB (period={period})")
+    else:
+            print(f"📡 [{symbol}] Fetching from yfinance (period={period})…")
+
+            # 🚨 Prevent duplicate API calls
+            if symbol in _LOADING:
+                print(f"⏳ [{symbol}] Already loading, fetching again (no wait)")
+                data = get_stock_data(symbol, period)
+            else:
+                _LOADING.add(symbol)
+
+                data = get_stock_data(symbol, period)
+
+                if data is not None:
+                    # ⚡ SAVE IN BACKGROUND (NON-BLOCKING)
+                    def _save_bg():
+                        try:
+                            print(f"💾 [{symbol}] Saving price data in background...")
+                            store_price_data(symbol, data)
+                            print(f"✅ [{symbol}] Price data saved (bg).")
+                        except Exception as e:
+                            print(f"❌ [{symbol}] Save failed: {e}")
+                        finally:
+                            _LOADING.discard(symbol)
+
+                    threading.Thread(target=_save_bg, daemon=True).start()
+
+    if data is None or data.empty:
+        raise ValueError(
+            f"No data found for '{symbol}'. "
+            "Please enter a valid NSE symbol e.g. RELIANCE.NS or TCS.NS."
+        )
+
+    # ── 2. Pure compute ────────────────────────────────────────
+    result, short_col, long_col = _compute_strategy(data, short_ema, long_ema)
+
+    # Add symbol/period to result (needed by template)
+    result["symbol"] = symbol
+    result["period"] = period
+
+    # ── 3. Save signals/trades/metrics in background ──────────
+    # Using a lock so the same symbol is never saved twice concurrently.
+    save_key = f"{symbol}_{short_ema}_{long_ema}"
+
+    if save_key not in _SAVING_NOW:
+        _SAVING_NOW.add(save_key)
+
+        _sig_copy = list(result["signals"])
+        _trd_copy = list(result["detailed_trades"])
+        _met_db   = {
+            **result["metrics"],
+            "Sharpe":       result["sharpe"],
+            "Max Drawdown": result["max_drawdown"],
+        }
+
+        def _bg_save():
+            try:
+                save_stock(symbol)
+
+                if not signals_exist(symbol, short_ema, long_ema):
+                    save_signals(symbol, _sig_copy, short_ema, long_ema)
+                else:
+                    print(f"⚡ [{symbol}] Signals exist, skip")
+
+                if not trades_exist(symbol):
+                    save_trades(symbol, _trd_copy)
+                else:
+                    print(f"⚡ [{symbol}] Trades exist, skip")
+
+                if not load_metrics(symbol, short_ema, long_ema):
+                    save_metrics(symbol, _met_db, short_ema, long_ema)
+                else:
+                    print(f"⚡ [{symbol}] Metrics exist, skip")
+
+                print(f"✅ [{symbol}] DB save complete (deduped)")
+
+            except Exception as exc:
+                print(f"⚠️ DB save error: {exc}")
+
+            finally:
+                _SAVING_NOW.discard(save_key)
+
+        threading.Thread(target=_bg_save, daemon=True).start()
+    else:
+        print(f"⏭️  [{symbol}] Save already in progress, skipping duplicate.")
+
+    return result, data, short_col, long_col
+
+
+# ─────────────────────────────────────────────
+# COMPARE  (read-only, never writes to DB)
+# ─────────────────────────────────────────────
+
+def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> dict:
+    """
+    Lightweight read-only version for the compare API.
+    Loads price data from DB (or yfinance if not cached — WITHOUT saving).
+    Calls _compute_strategy() and returns only the metrics needed.
+    NEVER writes anything to the database.
+    """
+    # Try DB first
+    data = load_price_data(symbol, period)
+
+    if data is not None:
+        print(f"⚡ [CMP {symbol}] DB hit")
+    else:
+        # Fallback to API for compare — but NO save
+        print(f"📡 [CMP {symbol}] DB miss — fetching from yfinance (no save)")
+        data = get_stock_data(symbol, period)
+
+    if data is None or data.empty:
+        raise ValueError(f"No data found for '{symbol}'.")
+
+    result, _, _ = _compute_strategy(data, short_ema, long_ema)
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -229,9 +340,7 @@ def index():
     dates       = None
     buy_points  = []
     sell_points = []
-
-    # Always load watchlist for the sidebar (both GET and POST)
-    watchlist = get_watchlist(8)
+    watchlist   = get_watchlist(8)
 
     if request.method == "POST":
         try:
@@ -264,7 +373,6 @@ def index():
                     {"x": fd, "y": price}
                 )
 
-            # Refresh watchlist after saving this symbol
             watchlist = get_watchlist(8)
 
         except Exception as exc:
@@ -286,25 +394,21 @@ def index():
 
 
 # ─────────────────────────────────────────────
-# WATCHLIST API  (Feature 4)
+# WATCHLIST API
 # ─────────────────────────────────────────────
 
 @app.route("/api/watchlist", methods=["GET"])
 def api_watchlist():
-    """Returns recently analysed symbols as JSON."""
     return jsonify(get_watchlist(8))
 
 
 # ─────────────────────────────────────────────
-# CSV EXPORT ENDPOINTS  (Feature 6)
+# CSV EXPORT ENDPOINTS
 # ─────────────────────────────────────────────
 
 @app.route("/api/export/trades", methods=["POST"])
 def export_trades():
-    """
-    Re-runs the strategy for the submitted symbol/period/EMA and
-    returns the detailed trades as a downloadable CSV file.
-    """
+    """Download trade history as CSV. Hits DB — instant after first analyze."""
     try:
         symbol_input = request.form.get("symbol", "").strip()
         period_input = request.form.get("period", "1y")
@@ -313,14 +417,16 @@ def export_trades():
 
         symbol = resolve_symbol(symbol_input)
         period = format_period(period_input)
-        result, _, _, _ = run_strategy(symbol, period, short_ema, long_ema)
+
+        # compare_strategy = read-only, won't trigger a new DB write
+        res = compare_strategy(symbol, period, short_ema, long_ema)
 
         buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["Buy Date", "Buy Price", "Sell Date",
-                         "Sell Price", "Return (%)", "Quality"])
-        for t in result["detailed_trades"]:
-            writer.writerow([
+        w   = csv.writer(buf)
+        w.writerow(["Buy Date", "Buy Price", "Sell Date", "Sell Price",
+                    "Return (%)", "Quality"])
+        for t in res["detailed_trades"]:
+            w.writerow([
                 str(t["buy_date"]).replace(" 00:00:00", ""),
                 t["buy_price"],
                 str(t["sell_date"]).replace(" 00:00:00", ""),
@@ -329,11 +435,11 @@ def export_trades():
                 t["quality"],
             ])
 
-        filename = f"trades_{symbol}_{period}.csv"
         return Response(
             buf.getvalue(),
             mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition":
+                     f"attachment; filename=trades_{symbol}_{period}.csv"}
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
@@ -341,7 +447,7 @@ def export_trades():
 
 @app.route("/api/export/signals", methods=["POST"])
 def export_signals():
-    """Returns the Signal Intelligence table as a CSV file."""
+    """Download signal intelligence table as CSV."""
     try:
         symbol_input = request.form.get("symbol", "").strip()
         period_input = request.form.get("period", "1y")
@@ -350,15 +456,15 @@ def export_signals():
 
         symbol = resolve_symbol(symbol_input)
         period = format_period(period_input)
-        result, _, _, _ = run_strategy(symbol, period, short_ema, long_ema)
+        res    = compare_strategy(symbol, period, short_ema, long_ema)
 
         buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["Date", "Type", "Price", "EMA S", "EMA L",
-                         "Strength", "Confidence (%)", "Label",
-                         "+1D (%)", "+3D (%)", "+1W (%)", "+1M (%)"])
-        for row in result["table"]:
-            writer.writerow([
+        w   = csv.writer(buf)
+        w.writerow(["Date", "Type", "Price", "EMA S", "EMA L",
+                    "Strength", "Confidence (%)", "Label",
+                    "+1D (%)", "+3D (%)", "+1W (%)", "+1M (%)"])
+        for row in res["table"]:
+            w.writerow([
                 row["Date"], row["type"], row["Price"],
                 row["EMA_Short"], row["EMA_Long"],
                 row["Strength"], row["Confidence"], row["Label"],
@@ -366,18 +472,18 @@ def export_signals():
                 row.get("+1W", ""), row.get("+1M", ""),
             ])
 
-        filename = f"signals_{symbol}_{period}.csv"
         return Response(
             buf.getvalue(),
             mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition":
+                     f"attachment; filename=signals_{symbol}_{period}.csv"}
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
 
 
 # ─────────────────────────────────────────────
-# STRATEGY COMPARISON API
+# STRATEGY COMPARISON API  (read-only)
 # ─────────────────────────────────────────────
 
 EMA_INSIGHTS = {
@@ -390,6 +496,10 @@ EMA_INSIGHTS = {
 
 @app.route("/api/compare", methods=["POST"])
 def api_compare():
+    """
+    Compares a different EMA pair on the same symbol/period.
+    Uses compare_strategy() — read-only, never touches the DB.
+    """
     try:
         body      = request.get_json()
         symbol    = body.get("symbol", "").strip()
@@ -402,7 +512,7 @@ def api_compare():
         if short_ema >= long_ema:
             return jsonify({"error": "Short EMA must be less than Long EMA."}), 400
 
-        res, _, _, _ = run_strategy(resolve_symbol(symbol), period, short_ema, long_ema)
+        res = compare_strategy(resolve_symbol(symbol), period, short_ema, long_ema)
         key = f"{short_ema}/{long_ema}"
 
         return jsonify({
@@ -413,7 +523,10 @@ def api_compare():
             "cagr":         res["cagr"],
             "sharpe":       res["sharpe"],
             "max_dd":       res["max_drawdown"],
-            "insight":      EMA_INSIGHTS.get(key, f"Custom EMA {key} — results vary by stock and market regime."),
+            "insight":      EMA_INSIGHTS.get(
+                                key,
+                                f"Custom EMA {key} — results vary by stock and market regime."
+                            ),
         })
 
     except Exception as exc:
