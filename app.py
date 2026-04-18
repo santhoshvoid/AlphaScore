@@ -30,6 +30,7 @@ from flask import Flask, render_template, request, jsonify, Response
 import threading
 import csv
 import io
+from src.sentiment import get_sentiment
 from src.data_fetch import get_stock_data, store_price_data
 from src.indicators import calculate_ema
 from src.signals import detect_crossovers
@@ -92,7 +93,7 @@ def format_period(user_input: str) -> str:
 # PURE COMPUTE  (no DB reads or writes)
 # ─────────────────────────────────────────────
 
-def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
+def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> tuple:
     """
     Pure computation layer — EMAs → signals → backtest → metrics.
     Takes a price DataFrame, returns (result_dict, short_col, long_col).
@@ -119,8 +120,10 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
 
     if "Bullish" in ml_result["prediction"]:
         ml_score = ml_conf
-    else:
+    elif "Bearish" in ml_result["prediction"]:
         ml_score = -ml_conf
+    else:
+        ml_score = 0
     # ── Detailed trades ────────────────────────────────────────
     detailed_trades = []
     i = 0
@@ -193,10 +196,13 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
 
 
     # ── TEMP SENTIMENT (placeholder)
-    sentiment_result = {
-        "prediction": "Neutral 😐",
-        "confidence": 50
-    }
+    try:
+        sentiment_result = get_sentiment(symbol)
+    except:
+        sentiment_result = {
+            "prediction": "Neutral 😐",
+            "confidence": 0
+        }
     # ── SENTIMENT SCORE ──────────────────────────
     sent_conf = sentiment_result["confidence"] / 100
 
@@ -215,26 +221,49 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
     # normalize (important)
     price = latest["Close"]
 
-    ema_score = (latest_trend / price) * 10
-    ema_score = max(min(ema_score, 1), -1)
+    ema_score = latest_trend / price
+    ema_score = max(min(ema_score* 3, 1), -1)
+
+    # ── MARKET REGIME DETECTION ───────────────────
+    ema_diff = latest[short_col] - latest[long_col]
+
+    trend_strength = abs(ema_diff) / price
+
+    if trend_strength > 0.02:
+        regime = "TRENDING"
+    else:
+        regime = "SIDEWAYS"
 
     # ── RELIABILITY WEIGHTS ───────────────────────
+    # ── ADAPTIVE WEIGHTING ────────────────────────
+    if regime == "TRENDING":
+        ml_weight = 0.4
+        ema_weight = 0.4
+        sent_weight = 0.2
+    else:
+        ml_weight = 0.6
+        ema_weight = 0.2
+        sent_weight = 0.2
 
-    # ML reliability (based on its own confidence)
-    ml_weight = 0.5 * ml_conf
+    base_ml, base_ema, base_sent = ml_weight, ema_weight, sent_weight
 
-    # EMA reliability (stronger trend = more reliable)
+    # dynamic scaling
+    ml_strength = abs(ml_score)
     ema_strength = abs(ema_score)
-    ema_weight = 0.3 * ema_strength
+    sent_strength = abs(sentiment_score)
 
-    # Sentiment reliability (later will be FinBERT)
-    sent_weight = 0.2 * sent_conf
+    ml_weight = base_ml * (0.5 + ml_strength)
+    ema_weight = base_ema * (0.5 + ema_strength)
+    sent_weight = base_sent * (0.5 + sent_strength)
 
-    # normalize weights (VERY IMPORTANT)
+    # confidence influence
+    ml_weight *= ml_conf
+    sent_weight *= sent_conf
+
+    # normalize
     total_weight = ml_weight + ema_weight + sent_weight
-
     if total_weight == 0:
-        total_weight = 1  # avoid divide by zero
+        total_weight = 1
 
     ml_weight /= total_weight
     ema_weight /= total_weight
@@ -242,48 +271,59 @@ def _compute_strategy(data, short_ema: int, long_ema: int) -> tuple:
 
     # ── FINAL DECISION ENGINE (v2) ───────────────
     final_score = (
-        ml_weight * ml_score +
-        ema_weight * ema_score +
-        sent_weight * sentiment_score
+        ml_score * ml_weight +
+        ema_score * ema_weight +
+        sentiment_score * sent_weight
     )
     # ── DISAGREEMENT PENALTY ─────────────────────
+    signal_scores = [ml_score, ema_score, sentiment_score]
 
+    positive = sum(1 for s in signal_scores if s > 0)
+    negative = sum(1 for s in signal_scores if s < 0)
+
+    # disagreement intensity
     disagreement = 0
 
-    # ML vs EMA
     if ml_score * ema_score < 0:
-        disagreement += 0.15
+        disagreement += 0.4
 
-    # ML vs Sentiment
     if ml_score * sentiment_score < 0:
-        disagreement += 0.10
+        disagreement += 0.3
 
-    # EMA vs Sentiment
     if ema_score * sentiment_score < 0:
-        disagreement += 0.05
+        disagreement += 0.2
 
-    # apply penalty
-    final_score *= (1 - disagreement)
+    # clamp
+    disagreement = min(disagreement, 0.8)
 
-    if final_score > 0.1:
+    penalty_factor = 1 - disagreement
+
+    final_score *= penalty_factor
+
+    if final_score > 0.05:
         final_prediction = "Bullish 📈"
-    elif final_score < -0.1:
+    elif final_score < -0.05:
         final_prediction = "Bearish 📉"
     else:
         final_prediction = "Neutral ⚖️"
 
-
-    # ── CONFIDENCE CALIBRATION ───────────────────
+    # ── ADVANCED CONFIDENCE ─────────────────────
 
     confidence = abs(final_score)
 
-    # smooth scaling
+    # agreement boost
+    agreement_score = (positive - negative) / 3  # -1 to 1
+    confidence *= (1 + agreement_score * 0.5)
+
+    # regime boost
+    if regime == "TRENDING":
+        confidence *= 1.1
+
+    # smooth curve
     confidence = confidence ** 0.7
 
-    # penalize low agreement
-    confidence *= (1 - disagreement)
-
-    final_confidence = round(confidence * 100, 2)
+    # clamp
+    final_confidence = round(max(min(confidence, 1), 0) * 100, 2)
 
 
     result = {
@@ -367,7 +407,7 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
         )
 
     # ── 2. Pure compute ────────────────────────────────────────
-    result, short_col, long_col = _compute_strategy(data, short_ema, long_ema)
+    result, short_col, long_col = _compute_strategy(data, short_ema, long_ema, symbol)
 
     # Add symbol/period to result (needed by template)
     result["symbol"] = symbol
@@ -446,7 +486,7 @@ def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) ->
     if data is None or data.empty:
         raise ValueError(f"No data found for '{symbol}'.")
 
-    result, _, _ = _compute_strategy(data, short_ema, long_ema)
+    result, _, _ = _compute_strategy(data, short_ema, long_ema, symbol)
     return result
 
 
