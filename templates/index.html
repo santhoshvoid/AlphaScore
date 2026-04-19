@@ -142,14 +142,83 @@
                     <p>Confidence: {{ result.sentiment_prediction.confidence }}%</p>
                 </div>
 
-                <!-- 🔹 FINAL DECISION -->
+                <!-- 🔹 FINAL DECISION + EXPLAINABILITY -->
                 <div class="prediction-box final-box">
-                    <h3>🎯 Final Decision Engine</h3>
+                    <div class="final-box-header">
+                        <h3>🎯 Final Decision Engine</h3>
+                        <button class="breakdown-toggle" id="breakdownToggle" onclick="toggleBreakdown()" title="Show decision breakdown">
+                            Decision Breakdown ▾
+                        </button>
+                    </div>
                     <p class="pred-desc">
                         Final prediction combining technical signals and sentiment analysis.
                     </p>
-                    <p>{{ result.final_prediction.prediction }}</p>
-                    <p>Confidence: {{ result.final_prediction.confidence }}%</p>
+
+                    <!-- Main prediction display -->
+                    <div class="final-prediction-display">
+                        <span class="final-pred-label {{ 'pred-bullish' if 'Bullish' in result.final_prediction.prediction else ('pred-bearish' if 'Bearish' in result.final_prediction.prediction else 'pred-neutral') }}">
+                            {{ result.final_prediction.prediction }}
+                        </span>
+                        <span class="final-pred-conf">{{ result.final_prediction.confidence }}% confidence</span>
+                        {% if result.explainability and result.explainability.regime %}
+                        <span class="regime-badge {{ 'regime-trending' if result.explainability.regime == 'TRENDING' else 'regime-sideways' }}">
+                            {{ result.explainability.regime }}
+                        </span>
+                        {% endif %}
+                    </div>
+
+                    <!-- Explainability breakdown (collapsed by default) -->
+                    <div class="breakdown-panel" id="breakdownPanel" style="display:none;">
+                        <div class="breakdown-row">
+                            <span class="bk-label">ML Score</span>
+                            <div class="bk-bar-wrap">
+                                <div class="bk-bar {{ 'bk-pos' if result.explainability.ml_score >= 0 else 'bk-neg' }}"
+                                     style="width:{{ [result.explainability.ml_score|abs * 100, 100]|min|round|int }}%"></div>
+                            </div>
+                            <span class="bk-value {{ 'bk-bull' if result.explainability.ml_score > 0 else ('bk-bear' if result.explainability.ml_score < 0 else '') }}">
+                                {{ result.explainability.ml_label }}
+                            </span>
+                            <span class="bk-weight">{{ result.explainability.ml_weight_pct }}%</span>
+                        </div>
+
+                        <div class="breakdown-row">
+                            <span class="bk-label">EMA Score</span>
+                            <div class="bk-bar-wrap">
+                                <div class="bk-bar {{ 'bk-pos' if result.explainability.ema_score >= 0 else 'bk-neg' }}"
+                                     style="width:{{ [result.explainability.ema_score|abs * 100, 100]|min|round|int }}%"></div>
+                            </div>
+                            <span class="bk-value {{ 'bk-bull' if result.explainability.ema_score > 0 else ('bk-bear' if result.explainability.ema_score < 0 else '') }}">
+                                {{ result.explainability.ema_label }}
+                            </span>
+                            <span class="bk-weight">{{ result.explainability.ema_weight_pct }}%</span>
+                        </div>
+
+                        <div class="breakdown-row">
+                            <span class="bk-label">Sentiment</span>
+                            <div class="bk-bar-wrap">
+                                <div class="bk-bar {{ 'bk-pos' if result.explainability.sent_score >= 0 else 'bk-neg' }}"
+                                     style="width:{{ [result.explainability.sent_score|abs * 100, 100]|min|round|int }}%"></div>
+                            </div>
+                            <span class="bk-value {{ 'bk-bull' if result.explainability.sent_score > 0 else ('bk-bear' if result.explainability.sent_score < 0 else '') }}">
+                                {{ result.explainability.sent_label }}
+                            </span>
+                            <span class="bk-weight">{{ result.explainability.sent_weight_pct }}%</span>
+                        </div>
+
+                        {% if result.explainability.disagreement > 0 %}
+                        <p class="bk-disagree">
+                            ⚠️ Signal disagreement detected ({{ (result.explainability.disagreement * 100)|round|int }}% penalty applied)
+                        </p>
+                        {% endif %}
+
+                        {% if result.explainability.data_quality in ["insufficient", "low", "error", "no_api_key"] %}
+                        <p class="bk-warn">
+                            ⚠️ Sentiment based on {{ result.explainability.article_count }} article(s) — low confidence, reduced weight
+                        </p>
+                        {% endif %}
+
+                        <p class="bk-footer">Weight = how much each signal influenced the final decision</p>
+                    </div>
                 </div>
 
             </div>
@@ -1052,6 +1121,18 @@
     }
  
 })();
+</script>
+
+<!-- Explainability breakdown toggle -->
+<script>
+function toggleBreakdown() {
+    var panel  = document.getElementById('breakdownPanel');
+    var toggle = document.getElementById('breakdownToggle');
+    if (!panel) return;
+    var isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+    toggle.textContent = isOpen ? 'Decision Breakdown ▾' : 'Decision Breakdown ▴';
+}
 </script>
 </body>
 </html>
