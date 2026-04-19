@@ -27,6 +27,9 @@ What changed in this version
    mobile layout · DB caching · watchlist chips
 """
 
+from datetime import datetime
+import time
+
 from flask import Flask, render_template, request, jsonify, Response, make_response
 import threading
 import csv
@@ -37,7 +40,7 @@ import json
 # The actual model loading happens inside _compute_strategy on first call.
 from src.ml_model import predict_latest
 from src.sentiment import get_sentiment
-
+from src.redis_client import get_redis
 from src.data_fetch import get_stock_data, store_price_data
 from src.indicators import calculate_ema
 from src.signals import detect_crossovers
@@ -66,7 +69,7 @@ app = Flask(__name__)
 
 _SAVING_NOW: set = set()
 _LOADING:    set = set()
-
+redis_client = get_redis()
 COOKIE_NAME     = "user_history"
 COOKIE_MAX_AGE  = 60 * 60 * 24 * 30   # 30 days
 COOKIE_MAX_ITEMS = 8
@@ -415,6 +418,43 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
     Returns (result_dict, data_df, short_col, long_col).
     Price data is fetched then saved in background (non-blocking UI).
     """
+    # 🔥 REDIS CACHE CHECK (ADD THIS BLOCK)
+
+    cache_key = f"{symbol}_{period}_{short_ema}_{long_ema}"
+
+    cached = redis_client.get(cache_key)
+
+    if cached:
+        print(f"⚡ [{symbol}] REDIS HIT")
+        result = json.loads(cached)
+
+        # 🔥 LOAD DATA AGAIN FOR UI (IMPORTANT)
+        data = load_price_data(symbol, period)
+
+        # fallback safety (rare case)
+        if data is None or data.empty:
+            print(f"⏳ [{symbol}] Waiting for DB...")
+
+            for _ in range(3):  # retry 3 times
+                time.sleep(0.5)
+                data = load_price_data(symbol, period)
+                if data is not None and not data.empty:
+                    break
+
+            if data is None or data.empty:
+                print(f"⚠️ [{symbol}] DB unavailable — returning cached result only")
+
+                # return WITHOUT touching data
+                return result, None, None, None
+
+        short_col = f"EMA{short_ema}"
+        long_col  = f"EMA{long_ema}"
+
+        data[short_col] = calculate_ema(data["Close"], short_ema)
+        data[long_col]  = calculate_ema(data["Close"], long_ema)
+
+        return result, data, short_col, long_col
+    print(f"🐢 [{symbol}] REDIS MISS")
 
     # ── 1. Price data ──────────────────────────────────────────
     data = load_price_data(symbol, period)
@@ -488,7 +528,15 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
         threading.Thread(target=_bg_save, daemon=True).start()
     else:
         print(f"⏭️  [{symbol}] Save already in progress, skipping.")
-
+    # 🔥 STORE IN REDIS
+    try:
+        redis_client.setex(
+            cache_key,
+            300,
+            json.dumps(result, default=str)
+        )
+    except Exception as e:
+        print(f"⚠️ Redis error: {e}")
     return result, data, short_col, long_col
 
 
@@ -502,6 +550,15 @@ def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) ->
     Loads from DB if available; falls back to yfinance WITHOUT saving.
     Never writes to the database.
     """
+    cache_key = f"{symbol}_{period}_{short_ema}_{long_ema}"
+    cached = redis_client.get(cache_key)
+
+    if cached:
+        try:
+            print(f"⚡ [CMP {symbol}] REDIS HIT")
+            return json.loads(cached)
+        except Exception:
+            print(f"⚠️ [CMP {symbol}] Redis decode failed — recomputing")
     data = load_price_data(symbol, period)
 
     if data is not None:
@@ -514,6 +571,8 @@ def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) ->
         raise ValueError(f"No data found for '{symbol}'.")
 
     result, _, _ = _compute_strategy(data, short_ema, long_ema, symbol)
+    redis_client.setex(cache_key, 300, json.dumps(result, default=str))
+
     return result
 
 
@@ -555,17 +614,31 @@ def index():
                 symbol, period, short_ema, long_ema
             )
 
-            prices      = data["Close"].tolist()
-            ema_short_d = data[short_col].tolist()
-            ema_long_d  = data[long_col].tolist()
-            dates       = data.index.strftime("%Y-%m-%d").tolist()
+            if data is not None:
+                prices      = data["Close"].tolist()
+                ema_short_d = data[short_col].tolist()
+                ema_long_d  = data[long_col].tolist()
+                dates       = data.index.strftime("%Y-%m-%d").tolist()
 
-            for signal, date in result["signals"]:
-                price = float(data.loc[data.index == date, "Close"].values[0])
-                fd    = date.strftime("%Y-%m-%d")
-                (buy_points if signal == "BUY" else sell_points).append(
-                    {"x": fd, "y": price}
-                )
+            if data is not None:
+                for signal, date in result["signals"]:
+
+                    if isinstance(date, str):
+                        date_obj = datetime.fromisoformat(date)
+                    else:
+                        date_obj = date
+
+                    # safer lookup
+                    row = data.loc[data.index == date_obj]
+
+                    if not row.empty:
+                        price = float(row["Close"].values[0])
+                        fd = date_obj.strftime("%Y-%m-%d")
+
+                        (buy_points if signal == "BUY" else sell_points).append({
+                            "x": fd,
+                            "y": price
+                        })
 
         except Exception as exc:
             error = str(exc)
