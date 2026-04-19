@@ -7,11 +7,13 @@ import os
 
 load_dotenv()
 sentiment_cache = {}
+os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
 # Load FinBERT once (important)
 MODEL_NAME = "ProsusAI/finbert"
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 
 API_KEY = os.getenv("NEWS_API_KEY")
 if not API_KEY:
