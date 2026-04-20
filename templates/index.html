@@ -116,7 +116,31 @@
         {% if result %}
         <div class="card perf-card anim" style="animation-delay:0.05s">
 
-            <h2>📊 Performance</h2>
+            <div class="perf-card-header">
+                <h2>📊 Performance</h2>
+                {% if result %}
+                <button class="alert-toggle-btn" id="alertToggleBtn" onclick="toggleAlertForm()" title="Set EMA alert for this stock">
+                    🔔 Set Alert
+                </button>
+                {% endif %}
+            </div>
+
+            <!-- EMAIL ALERT FORM (collapsed by default) -->
+            {% if result %}
+            <div id="alertFormPanel" class="alert-form-panel" style="display:none;">
+                <p class="alert-form-desc">
+                    Get notified when <strong>{{ result.symbol }}</strong> EMA {{ result.short_ema }}/{{ result.long_ema }} crosses or converges.
+                </p>
+                <div class="alert-input-row">
+                    <input type="email" id="alertEmailInput"
+                           placeholder="your@email.com"
+                           value="{{ saved_email or '' }}"
+                           class="alert-email-input">
+                    <button class="alert-submit-btn" onclick="submitAlert()">Notify Me</button>
+                </div>
+                <p id="alertStatus" class="alert-status" style="display:none;"></p>
+            </div>
+            {% endif %}
 
 
             <!-- 🔥 ML PREDICTION BOX (ADD HERE) -->
@@ -332,7 +356,7 @@
         </div>
     </div>
 
-    {% if portfolio %}
+    {% if portfolio and portfolio.history and portfolio.history|length > 0 %}
     <div class="portfolio-stats" id="portfolioStats">
         <div class="port-stat {% if portfolio.total_gain_pct > 0 %}profit{% else %}loss{% endif %}">
             <div class="port-stat-label">Final Value</div>
@@ -348,7 +372,7 @@
         </div>
         <div class="port-stat">
             <div class="port-stat-label">Trades Taken</div>
-            <div class="port-stat-value">{{ portfolio.history|length - 1 }}</div>
+            <div class="port-stat-value">{{ portfolio.trades }}</div>
         </div>
     </div>
     <div class="chart-canvas-wrap portfolio-chart-wrap">
@@ -757,23 +781,49 @@
 <script>
 (function() {
     var portfolioData = {{ portfolio | tojson | safe }};
-    var portChart = null;
+    if (!portfolioData || !portfolioData.history) return;
 
+    // Filter out non-date entries (e.g. "Start" placeholder if present)
+    portfolioData.history = portfolioData.history.filter(function(p) {
+        return p.date && !isNaN(new Date(p.date));
+    });
+    if (portfolioData.history.length === 0) return;
+
+    // Derive base capital: final - total_gain = initial capital used on server
+    // Falls back to 100000 if arithmetic produces nonsense
+    var BASE_CAPITAL = Math.round((portfolioData.final - portfolioData.total_gain) * 100) / 100;
+    if (!BASE_CAPITAL || BASE_CAPITAL <= 0) BASE_CAPITAL = 100000;
+
+    var portChart    = null;
+    var _lastPortData = null;  // always holds the most recently rendered dataset
+
+    // ── Build chart ──────────────────────────────────────────
     function buildPortfolioChart(data) {
+        _lastPortData = data;   // remember for theme-rebuild
+
         var canvas = document.getElementById('portfolioChart');
         if (!canvas) return;
-
         if (portChart) { portChart.destroy(); portChart = null; }
 
-        var isDark   = document.body.classList.contains('dark');
-        var labels   = data.history.map(function(h) { return h.date; });
-        var capitals = data.history.map(function(h) { return h.capital; });
+        // Accept either a filtered history or filter on the fly
+        var history = (data.history || []).filter(function(p) {
+            return p.date && !isNaN(new Date(p.date));
+        });
+        if (!history || history.length === 0) return;
 
-        var isProfit = capitals[capitals.length - 1] >= capitals[0];
+        var isDark    = document.body.classList.contains('dark');
+        var labels    = history.map(function(h) { return h.date; });
+        var capitals  = history.map(function(h) { return h.capital; });
+
+        var isProfit  = capitals[capitals.length - 1] >= capitals[0];
         var lineColor = isProfit ? '#00e676' : '#ff5252';
         var fillColor = isProfit ? 'rgba(0,230,118,0.08)' : 'rgba(255,82,82,0.08)';
         var gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.07)';
         var tickColor = isDark ? '#4a6080' : '#64748b';
+
+        // Use small dots for dense daily data, larger dots for sparse trade data
+        var ptRadius      = capitals.length > 30 ? 2 : 6;
+        var ptHoverRadius = capitals.length > 30 ? 5 : 9;
 
         portChart = new Chart(canvas.getContext('2d'), {
             type: 'line',
@@ -787,11 +837,11 @@
                     tension: 0.35,
                     fill: true,
                     backgroundColor: fillColor,
-                    pointRadius: 6,
+                    pointRadius: ptRadius,
                     pointBackgroundColor: lineColor,
                     pointBorderColor: isDark ? '#0b0f1a' : '#ffffff',
                     pointBorderWidth: 2,
-                    pointHoverRadius: 9
+                    pointHoverRadius: ptHoverRadius
                 }]
             },
             options: {
@@ -803,103 +853,120 @@
                     tooltip: {
                         backgroundColor: isDark ? '#0d1830' : '#ffffff',
                         titleColor: isDark ? '#8eb8e8' : '#1a1a2e',
-                        bodyColor: isDark ? '#6a8aaa' : '#64748b',
+                        bodyColor:  isDark ? '#6a8aaa' : '#64748b',
                         borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
                         borderWidth: 1,
                         padding: 12,
                         cornerRadius: 10,
                         callbacks: {
                             label: function(ctx) {
-                                return ' ₹' + ctx.raw.toLocaleString('en-IN');
+                                return ' ₹' + Math.round(ctx.raw).toLocaleString('en-IN');
                             }
                         }
                     }
                 },
                 scales: {
-                    x: { ticks:{color:tickColor, font:{size:11}}, grid:{color:gridColor} },
+                    x: {
+                        ticks: { color: tickColor, font: { size: 11 }, maxTicksLimit: 10 },
+                        grid:  { color: gridColor }
+                    },
                     y: {
                         ticks: {
-                            color: tickColor, font:{size:11},
-                            callback: function(v) { return '₹' + (v/1000).toFixed(0) + 'k'; }
+                            color: tickColor, font: { size: 11 },
+                            callback: function(v) { return '₹' + (v / 1000).toFixed(0) + 'k'; }
                         },
-                        grid:{color:gridColor}
+                        grid: { color: gridColor }
                     }
                 }
             }
         });
     }
 
+    // ── Update stat boxes ────────────────────────────────────
     function updatePortfolioStats(data) {
         var stats = document.getElementById('portfolioStats');
         if (!stats) return;
         var items = stats.querySelectorAll('.port-stat-value');
         if (items.length >= 4) {
-            items[0].textContent = '₹' + data.final.toLocaleString('en-IN');
-            var gainSign = data.total_gain >= 0 ? '+' : '';
-            items[1].textContent = gainSign + '₹' + data.total_gain.toLocaleString('en-IN');
-            items[2].textContent = gainSign + data.total_gain_pct.toFixed(2) + '%';
-            items[3].textContent = (data.history.length - 1).toString();
+            items[0].textContent = '₹' + Math.round(data.final).toLocaleString('en-IN');
+
+            var gain     = data.total_gain;
+            var gainSign = gain >= 0 ? '+' : '-';
+            items[1].textContent = gainSign + '₹' + Math.abs(Math.round(gain)).toLocaleString('en-IN');
+
+            var pct     = data.total_gain_pct;
+            var pctSign = pct >= 0 ? '+' : '';
+            items[2].textContent = pctSign + pct.toFixed(2) + '%';
+
+            // Use explicit trade count, not history length
+            var tradeCount = (data.trades !== undefined) ? data.trades : portfolioData.trades;
+            items[3].textContent = tradeCount.toString();
         }
         stats.querySelectorAll('.port-stat').forEach(function(s, i) {
             if (i < 3) {
-                s.classList.remove('profit','loss');
+                s.classList.remove('profit', 'loss');
                 s.classList.add(data.total_gain_pct >= 0 ? 'profit' : 'loss');
             }
         });
     }
 
+    // ── Initial render ───────────────────────────────────────
     buildPortfolioChart(portfolioData);
 
-    // Re-simulate on capital change
+    // ── Simulate button: scale server data proportionally ───
+    // Using proportional scaling of the server's daily equity curve means:
+    //   • Open positions (no completed sell) are handled correctly
+    //   • The chart shape never changes, just the scale
+    //   • No dependency on detailed_trades (which is empty for open positions)
     document.getElementById('runPortfolio').addEventListener('click', function() {
         var capital = parseFloat(document.getElementById('capitalInput').value);
-        if (isNaN(capital) || capital < 1) { alert('Please enter a valid capital amount.'); return; }
+        if (isNaN(capital) || capital < 1) {
+            alert('Please enter a valid capital amount.');
+            return;
+        }
 
-        // Recalculate client-side
-        var trades  = {{ result.detailed_trades | tojson | safe }};
-        var c = capital;
-        var history = [{ date:'Start', capital: Math.round(c * 100) / 100 }];
-        trades.forEach(function(t) {
-            c = c * (1 + t['return'] / 100);
-            history.push({
-                date: String(t.sell_date).replace(' 00:00:00',''),
-                capital: Math.round(c * 100) / 100
-            });
+        var ratio = capital / BASE_CAPITAL;
+
+        var scaledHistory = portfolioData.history.map(function(p) {
+            return {
+                date:    p.date,
+                capital: Math.round(p.capital * ratio * 100) / 100
+            };
         });
 
-        var finalVal   = Math.round(c * 100) / 100;
-        var gain       = Math.round((finalVal - capital) * 100) / 100;
-        var gainPct    = Math.round((gain / capital) * 10000) / 100;
-        var newData    = { history: history, final: finalVal, total_gain: gain, total_gain_pct: gainPct };
+        var finalVal    = Math.round(portfolioData.final    * ratio * 100) / 100;
+        var totalGain   = Math.round((finalVal - capital)   * 100) / 100;
+        var totalGainPct = Math.round((totalGain / capital) * 10000) / 100;
+
+        var newData = {
+            history:        scaledHistory,
+            final:          finalVal,
+            total_gain:     totalGain,
+            total_gain_pct: totalGainPct,
+            trades:         portfolioData.trades   // completed trade count unchanged
+        };
 
         buildPortfolioChart(newData);
         updatePortfolioStats(newData);
     });
 
-    // Rebuild on theme toggle
+    // ── Theme toggle: rebuild with the LAST rendered state ──
+    // (NOT recalculated from scratch — that broke open-position charts)
     var _origRebuild = window._rebuildCharts;
     window._rebuildCharts = function() {
         if (_origRebuild) _origRebuild();
-        var cap = parseFloat(document.getElementById('capitalInput').value) || 100000;
-        var trades = {{ result.detailed_trades | tojson | safe }};
-        var c = cap;
-        var history = [{ date:'Start', capital:cap }];
-        trades.forEach(function(t) {
-            c = c * (1 + t['return'] / 100);
-            history.push({ date:String(t.sell_date).replace(' 00:00:00',''), capital:Math.round(c*100)/100 });
-        });
-        buildPortfolioChart({ history:history, final:Math.round(c*100)/100, total_gain:Math.round((c-cap)*100)/100, total_gain_pct:Math.round(((c-cap)/cap)*10000)/100 });
+        if (_lastPortData) buildPortfolioChart(_lastPortData);
     };
 })();
 </script>
 {% endif %}
 
-<!-- 5. STRATEGY COMPARISON -->
+<!-- 5. STRATEGY COMPARISON --> 
 {% if result %}
 <script>
 (function() {
-    var currentSymbol = {{ (result.symbol if result else "") | tojson | safe }};
-    var currentPeriod = {{ (result.period if result else "1y") | tojson | safe }};
+    var currentSymbol = {{ (result.get('symbol') if result else "") | tojson | safe }};
+    var currentPeriod = {{ (result.period if result and result.period else "1y") | tojson }};
 
     var selectedShort = null;
     var selectedLong  = null;
@@ -1134,5 +1201,159 @@ function toggleBreakdown() {
     toggle.textContent = isOpen ? 'Decision Breakdown ▾' : 'Decision Breakdown ▴';
 }
 </script>
+
+<!-- Alert form JS + CSS -->
+<style>
+.perf-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.perf-card-header h2 { margin: 0; }
+
+.alert-toggle-btn {
+    width: auto !important;
+    padding: 5px 12px !important;
+    font-size: 11px !important;
+    font-weight: 600;
+    background: rgba(108,92,231,0.10) !important;
+    border: 1px solid rgba(108,92,231,0.25) !important;
+    border-radius: 7px !important;
+    color: var(--accent, #6c5ce7) !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.alert-toggle-btn:hover {
+    background: var(--accent, #6c5ce7) !important;
+    color: white !important;
+    transform: none !important;
+}
+
+.alert-form-panel {
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: rgba(108,92,231,0.06);
+    border: 1px solid rgba(108,92,231,0.18);
+    margin-bottom: 14px;
+    animation: fadeSlideIn 0.2s ease;
+}
+.alert-form-desc {
+    font-size: 12px;
+    margin: 0 0 10px;
+    color: var(--text-muted, #64748b);
+}
+.alert-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.alert-email-input {
+    flex: 1;
+    padding: 8px 12px !important;
+    border-radius: 8px !important;
+    border: 1.5px solid var(--border-md, rgba(0,0,0,0.11)) !important;
+    background: var(--surface, rgba(255,255,255,0.97)) !important;
+    font-family: var(--font-ui, sans-serif) !important;
+    font-size: 13px !important;
+    color: var(--text-primary, #0b0f1e) !important;
+    outline: none !important;
+    width: auto !important;
+}
+.alert-email-input:focus {
+    border-color: var(--accent, #6c5ce7) !important;
+    box-shadow: 0 0 0 3px rgba(108,92,231,0.12) !important;
+}
+.alert-submit-btn {
+    width: auto !important;
+    padding: 8px 16px !important;
+    font-size: 12px !important;
+    font-weight: 600;
+    background: linear-gradient(135deg,#6c5ce7,#a29bfe) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    color: white !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.alert-submit-btn:hover { transform: translateY(-1px) !important; box-shadow: 0 4px 12px rgba(108,92,231,0.4) !important; }
+.alert-status {
+    font-size: 12px;
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+.alert-status.success {
+    background: rgba(5,150,105,0.1);
+    color: #059669;
+    border: 1px solid rgba(5,150,105,0.2);
+}
+.alert-status.error {
+    background: rgba(220,38,38,0.08);
+    color: #dc2626;
+    border: 1px solid rgba(220,38,38,0.15);
+}
+</style>
+
+<script>
+function toggleAlertForm() {
+    var panel = document.getElementById('alertFormPanel');
+    if (!panel) return;
+    var open = panel.style.display !== 'none';
+    panel.style.display = open ? 'none' : 'block';
+    var btn = document.getElementById('alertToggleBtn');
+    if (btn) btn.textContent = open ? '🔔 Set Alert' : '🔕 Hide Alert';
+}
+
+function submitAlert() {
+    var emailInput  = document.getElementById('alertEmailInput');
+    var statusEl    = document.getElementById('alertStatus');
+    var email       = emailInput ? emailInput.value.trim() : '';
+    var symbol      = '{{ result.symbol if result else "" }}';
+    var short_ema   = {{ result.short_ema if result else 20 }};
+    var long_ema    = {{ result.long_ema if result else 50 }};
+
+    if (!email || !email.includes('@')) {
+        statusEl.textContent  = '⚠️ Please enter a valid email address.';
+        statusEl.className    = 'alert-status error';
+        statusEl.style.display = 'block';
+        return;
+    }
+
+    // Save email to cookie for future pre-fill
+    var expires = new Date();
+    expires.setFullYear(expires.getFullYear() + 1);
+    document.cookie = 'user_email=' + encodeURIComponent(email)
+        + '; expires=' + expires.toUTCString() + '; path=/; SameSite=Lax';
+
+    fetch('/api/alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            email:     email,
+            symbol:    symbol,
+            short_ema: short_ema,
+            long_ema:  long_ema
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (d.success) {
+            statusEl.textContent  = '✅ ' + d.message;
+            statusEl.className    = 'alert-status success';
+        } else {
+            statusEl.textContent  = '⚠️ ' + (d.error || 'Something went wrong.');
+            statusEl.className    = 'alert-status error';
+        }
+        statusEl.style.display = 'block';
+    })
+    .catch(function() {
+        statusEl.textContent  = '⚠️ Network error. Please try again.';
+        statusEl.className    = 'alert-status error';
+        statusEl.style.display = 'block';
+    });
+}
+</script>
+
 </body>
 </html>

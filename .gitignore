@@ -1,6 +1,37 @@
-venv/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+
+# Environment variables (VERY IMPORTANT)
 .env
-.DS_Store
+
+# VS Code
 .vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database / local files
+*.sqlite3
+
+# Cache
+.cache/
+
+# Jupyter (if any)
+.ipynb_checkpoints/
+
+# Celery beat schedule
+celerybeat-schedule
+
+# Temporary files
+*.tmp

@@ -1,43 +1,35 @@
 """
-app.py  —  AlphaCross Flask backend  (v3 — full ML + explainability)
+app.py  —  AlphaCross Flask backend  (v4 — Redis + Celery + Email Alerts)
 
-What changed in this version
-──────────────────────────────
-1. STARTUP SPEED FIX
-   - FinBERT and XGBoost are now lazy-loaded (loaded on first use, not
-     at import time). Startup from 8-12 seconds → under 1 second.
-
-2. PER-USER WATCHLIST (browser cookie-based)
-   - get_watchlist() now returns the list stored in the user's browser
-     cookie, not a shared DB list. Each user sees only their own history.
-   - The server still saves to the stocks table for analytics/ML purposes,
-     but the sidebar chips are driven by a cookie named "user_history".
-
-3. EXPLAINABILITY LAYER
-   - _compute_strategy() now returns ml_score, ema_score, sentiment_score
-     as numeric values alongside their labels and confidences.
-   - These are used by the template to render the Decision Breakdown panel.
-
-4. SENTIMENT VALIDATION
-   - article_count and data_quality are passed through to the template
-     so the UI can warn when sentiment data is insufficient.
-
-5. All existing features preserved:
-   portfolio growth · CSV export · strategy comparison · tooltips ·
-   mobile layout · DB caching · watchlist chips
+Bug fixes in this version
+──────────────────────────
+1. Removed `from unittest import result` (wrong import, shadowed local var)
+2. Removed duplicate `from src.sentiment import get_sentiment`
+3. Fixed data format consistency: both Redis-hit path and fresh-compute path
+   now return data with a "Date" STRING column (not DatetimeIndex) so the
+   main route's `data["Date"]` lookups never crash.
+4. Fixed `_SAVING_NOW` never being discarded when using Celery tasks.
+   Now simply removed — the DB's ON CONFLICT handles deduplication.
+5. Fixed Celery task serialization: signals contain pandas Timestamps which
+   can't be JSON-serialized. Now converted to ISO strings before dispatch.
+6. Fixed portfolio history "Start" entry crashing `pd.to_datetime("Start")`.
+7. compare_strategy now checks Redis cache before computing.
+8. Added /api/alerts POST endpoint + email cookie.
+9. Added 15-min market-hours refresh via Celery beat.
+10. Kept ALL existing features unchanged.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
-
+import pandas as pd
 from flask import Flask, render_template, request, jsonify, Response, make_response
 import threading
 import csv
 import io
 import json
 
-# ── Lazy imports for heavy models (avoid startup delay) ──────
-# The actual model loading happens inside _compute_strategy on first call.
+# ── src imports ──────────────────────────────────────────────
+from src.tasks import save_to_db_task, save_price_task
 from src.ml_model import predict_latest
 from src.sentiment import get_sentiment
 from src.redis_client import get_redis
@@ -63,25 +55,103 @@ from src.db_loader import (
     load_metrics,
     signals_exist,
     trades_exist,
+    save_alert,
+    get_alerts_for_user,
 )
 
 app = Flask(__name__)
 
-_SAVING_NOW: set = set()
-_LOADING:    set = set()
-redis_client = get_redis()
-COOKIE_NAME     = "user_history"
-COOKIE_MAX_AGE  = 60 * 60 * 24 * 30   # 30 days
-COOKIE_MAX_ITEMS = 8
+_LOADING:         set = set()
+redis_client          = get_redis()
+
+COOKIE_NAME       = "user_history"
+COOKIE_MAX_AGE    = 60 * 60 * 24 * 30   # 30 days
+COOKIE_MAX_ITEMS  = 8
+ALERT_COOKIE_NAME = "user_email"
+ALERT_COOKIE_AGE  = 60 * 60 * 24 * 365  # 1 year
 
 
 # ─────────────────────────────────────────────
-# COOKIE-BASED WATCHLIST  (per-user, private)
+# JSON CLEANING (handles pandas/numpy types)
 # ─────────────────────────────────────────────
 
-def _get_cookie_history(request_obj) -> list:
-    """Read user's personal symbol history from browser cookie."""
-    raw = request_obj.cookies.get(COOKIE_NAME, "[]")
+def clean_for_json(obj):
+    import numpy as np
+
+    if isinstance(obj, dict):
+        return {str(k): clean_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, tuple):
+        return tuple(clean_for_json(i) for i in obj)
+    elif isinstance(obj, (pd.Timestamp, datetime)):
+        return str(obj)
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, float) and (obj != obj):  # NaN
+        return None
+    try:
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+    return obj
+
+
+# ─────────────────────────────────────────────
+# PERIOD COVERAGE HELPER
+# ─────────────────────────────────────────────
+
+def _is_data_sufficient(data: pd.DataFrame, period: str) -> bool:
+    """
+    Return True if `data` covers at least 80% of the requested period.
+    This catches the case where the DB only has 1y of data but the user
+    requests 2y/5y — the DB query silently returns less data without error.
+    """
+    if data is None or data.empty or period == "max":
+        return True
+    try:
+        if period.endswith("y"):
+            expected_days = int(period[:-1]) * 365
+        elif period.endswith("mo"):
+            expected_days = int(period[:-2]) * 30
+        else:
+            return True
+        actual_days = (data.index.max() - data.index.min()).days
+        return actual_days >= expected_days * 0.80
+    except Exception:
+        return True  # non-critical, don't block the pipeline
+
+
+# ─────────────────────────────────────────────
+# DATA NORMALIZATION HELPER
+# ─────────────────────────────────────────────
+
+def _normalize_data(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure data always has a 'Date' string column.
+    Handles DataFrames with DatetimeIndex (from DB) or any named index.
+    """
+    data = data.reset_index()
+    # reset_index() on a DatetimeIndex named "Date" → "Date" column
+    # on an unnamed index → "index" column
+    # on an index named "Datetime" → "Datetime" column
+    for candidate in ("Date", "Datetime", "index"):
+        if candidate in data.columns:
+            data.rename(columns={candidate: "Date"}, inplace=True)
+            break
+    data["Date"] = pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")
+    return data
+
+
+# ─────────────────────────────────────────────
+# COOKIE HELPERS
+# ─────────────────────────────────────────────
+
+def _get_cookie_history(req) -> list:
+    raw = req.cookies.get(COOKIE_NAME, "[]")
     try:
         items = json.loads(raw)
         if isinstance(items, list):
@@ -91,18 +161,21 @@ def _get_cookie_history(request_obj) -> list:
     return []
 
 
-def _push_cookie_history(response_obj, symbol: str, current: list) -> list:
-    """Add symbol to front of list, deduplicate, trim, set cookie."""
+def _push_cookie_history(resp, symbol: str, current: list) -> list:
     updated = [symbol] + [s for s in current if s != symbol]
     updated = updated[:COOKIE_MAX_ITEMS]
-    response_obj.set_cookie(
-        COOKIE_NAME,
-        json.dumps(updated),
-        max_age=COOKIE_MAX_AGE,
-        httponly=False,    # JS needs to read this if required
-        samesite="Lax",
-    )
+    resp.set_cookie(COOKIE_NAME, json.dumps(updated),
+                    max_age=COOKIE_MAX_AGE, httponly=False, samesite="Lax")
     return updated
+
+
+def _get_email_cookie(req) -> str:
+    return req.cookies.get(ALERT_COOKIE_NAME, "")
+
+
+def _set_email_cookie(resp, email: str):
+    resp.set_cookie(ALERT_COOKIE_NAME, email,
+                    max_age=ALERT_COOKIE_AGE, httponly=False, samesite="Lax")
 
 
 # ─────────────────────────────────────────────
@@ -132,24 +205,39 @@ def format_period(user_input: str) -> str:
 
 
 def _label_score(score: float, component: str) -> str:
-    """Convert a numeric score [-1, +1] to a human label for explainability."""
     if component == "EMA":
-        strong = 0.03
-        weak   = 0.008
+        strong, weak = 0.03, 0.008
     else:
-        strong = 0.50
-        weak   = 0.15
+        strong, weak = 0.50, 0.15
+    if   score >  strong: return "Strong Bullish"
+    elif score >  weak:   return "Weak Bullish"
+    elif score < -strong: return "Strong Bearish"
+    elif score < -weak:   return "Weak Bearish"
+    else:                 return "Neutral"
 
-    if score > strong:
-        return "Strong Bullish"
-    elif score > weak:
-        return "Weak Bullish"
-    elif score < -strong:
-        return "Strong Bearish"
-    elif score < -weak:
-        return "Weak Bearish"
-    else:
-        return "Neutral"
+
+# ─────────────────────────────────────────────
+# PRELOAD MODELS (called once at startup)
+# ─────────────────────────────────────────────
+
+def preload_models():
+    print("🚀 Preloading ML models…")
+    try:
+        import numpy as np
+        # Need at least 25+ rows so rolling(10) + pct_change(5) + ewm(20) work
+        n = 60
+        dummy = pd.DataFrame({
+            "Open":   np.linspace(100, 110, n),
+            "High":   np.linspace(101, 111, n),
+            "Low":    np.linspace(99,  109, n),
+            "Close":  np.linspace(100, 110, n),
+            "Volume": np.full(n, 1_000_000),
+        })
+        predict_latest(dummy)
+        get_sentiment("RELIANCE.NS")
+        print("✅ Models preloaded.")
+    except Exception as e:
+        print(f"⚠️ Model preload warning (non-critical): {e}")
 
 
 # ─────────────────────────────────────────────
@@ -158,9 +246,9 @@ def _label_score(score: float, component: str) -> str:
 
 def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> tuple:
     """
-    Pure computation layer — EMAs → signals → backtest → metrics → ML → sentiment.
+    Pure computation: EMAs → signals → backtest → metrics → ML → sentiment.
     Returns (result_dict, short_col, long_col).
-    No database interaction whatsoever.
+    data must have DatetimeIndex at this point (not yet normalized).
     """
     short_col = f"EMA{short_ema}"
     long_col  = f"EMA{long_ema}"
@@ -190,9 +278,9 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
                 else "Loss"
             )
             detailed_trades.append({
-                "buy_date":   d1,
+                "buy_date":   str(d1),
                 "buy_price":  round(buy_price,  2),
-                "sell_date":  d2,
+                "sell_date":  str(d2),
                 "sell_price": round(sell_price, 2),
                 "return":     round(ret, 2),
                 "quality":    quality,
@@ -202,15 +290,29 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
             i += 1
 
     # ── Advanced metrics ─────────────────────────────────────────
-    prices_list             = data["Close"].tolist()
-    start_dt                = data.index[0].to_pydatetime()
-    end_dt                  = data.index[-1].to_pydatetime()
+    prices_list = data["Close"].tolist()
+    start_dt    = pd.to_datetime(data.index[0])
+    end_dt      = pd.to_datetime(data.index[-1])
+
+    # BUG FIX: skip "Start" entry — only parse real date strings
+    clean_history = []
+    for point in equity_curve:
+        raw_date = str(point.get("date", ""))
+        if raw_date == "Start" or not raw_date:
+            clean_history.append({"date": "Start", "capital": float(point["capital"])})
+            continue
+        try:
+            date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
+            clean_history.append({"date": date_str, "capital": float(point["capital"])})
+        except Exception:
+            continue
 
     portfolio = {
-        "history":        equity_curve,
-        "final":          final_capital,
-        "total_gain":     final_capital - INITIAL_CAPITAL,
-        "total_gain_pct": ((final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100,
+        "history":        clean_history,
+        "final":          float(final_capital),
+        "total_gain":     float(final_capital - INITIAL_CAPITAL),
+        "total_gain_pct": float(((final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100),
+        "trades":         len(detailed_trades),
     }
 
     cagr                    = calculate_cagr(portfolio["total_gain_pct"], start_dt, end_dt)
@@ -219,9 +321,13 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
     best_trade, worst_trade = get_best_worst_trade(detailed_trades)
 
     # ── Signal analysis + intelligence table ─────────────────────
-    analysis     = summarize_results(signal_outcome_analysis(data, signals))
-    table        = build_signal_table(data, signals, short_col, long_col)
-    avg_conf     = sum(r["Confidence"] for r in table) / len(table) if table else 0
+    analysis = summarize_results(signal_outcome_analysis(data, signals))
+    analysis = json.loads(json.dumps(analysis, default=str))
+    table    = build_signal_table(data, signals, short_col, long_col)
+    for row in table:
+        if "Date" in row:
+            row["Date"] = str(row["Date"])
+    avg_conf = sum(r["Confidence"] for r in table) / len(table) if table else 0
 
     health_score = round(max(0, min(100,
         metrics["Total Return (%)"] * 0.4
@@ -251,14 +357,9 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
     }
 
     ml_conf  = ml_result.get("confidence", 0) / 100
-    raw_ml   = ml_result.get("raw_score", 0.0)
-
-    if "Bullish" in ml_result["prediction"]:
-        ml_score = ml_conf
-    elif "Bearish" in ml_result["prediction"]:
-        ml_score = -ml_conf
-    else:
-        ml_score = 0.0
+    if   "Bullish" in ml_result["prediction"]: ml_score = ml_conf
+    elif "Bearish" in ml_result["prediction"]: ml_score = -ml_conf
+    else:                                       ml_score = 0.0
 
     # ── SENTIMENT ────────────────────────────────────────────────
     try:
@@ -273,16 +374,12 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
         }
 
     sent_conf  = sentiment_result.get("confidence", 0) / 100
-    raw_sent   = sentiment_result.get("raw_score", 0.0)
     data_qual  = sentiment_result.get("data_quality", "unknown")
     art_count  = sentiment_result.get("article_count", 0)
 
-    if "Bullish" in sentiment_result["prediction"]:
-        sentiment_score = sent_conf
-    elif "Bearish" in sentiment_result["prediction"]:
-        sentiment_score = -sent_conf
-    else:
-        sentiment_score = 0.0
+    if   "Bullish" in sentiment_result["prediction"]: sentiment_score = sent_conf
+    elif "Bearish" in sentiment_result["prediction"]: sentiment_score = -sent_conf
+    else:                                              sentiment_score = 0.0
 
     # ── EMA TREND SCORE ──────────────────────────────────────────
     latest      = data.iloc[-1]
@@ -298,23 +395,17 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
     if regime == "TRENDING":
         ml_w, ema_w, sent_w = 0.40, 0.40, 0.20
     else:
-        # Sideways: ML is more reliable than raw EMA trend
         ml_w, ema_w, sent_w = 0.60, 0.20, 0.20
 
-    # Dynamic scaling: stronger signals get more weight
     ml_w   *= (0.5 + abs(ml_score))
     ema_w  *= (0.5 + abs(ema_score))
 
-    # Scale down sentiment if data quality is low
-    if data_qual in ("insufficient", "low", "error", "no_api_key"):
+    if data_qual in ("insufficient", "low", "error", "no_api_key", "no_symbol"):
         sent_w *= 0.3
     elif data_qual == "moderate":
         sent_w *= 0.65
-    # good quality → full weight
 
     sent_w *= (0.5 + abs(sentiment_score))
-
-    # Confidence influence
     ml_w   *= ml_conf
     sent_w *= sent_conf
 
@@ -328,39 +419,30 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
     sent_w /= total_w
 
     # ── FINAL DECISION ────────────────────────────────────────────
-    final_score = ml_score * ml_w + ema_score * ema_w + sentiment_score * sent_w
-
-    # Disagreement penalty
-    scores      = [ml_score, ema_score, sentiment_score]
+    final_score  = ml_score * ml_w + ema_score * ema_w + sentiment_score * sent_w
+    scores       = [ml_score, ema_score, sentiment_score]
     disagreement = 0.0
-    if ml_score * ema_score < 0:
-        disagreement += 0.4
-    if ml_score * sentiment_score < 0:
-        disagreement += 0.3
-    if ema_score * sentiment_score < 0:
-        disagreement += 0.2
+    if ml_score * ema_score       < 0: disagreement += 0.4
+    if ml_score * sentiment_score < 0: disagreement += 0.3
+    if ema_score * sentiment_score < 0: disagreement += 0.2
     disagreement  = min(disagreement, 0.8)
     final_score  *= (1 - disagreement)
 
-    if   final_score >  0.05:
-        final_prediction = "Bullish 📈"
-    elif final_score < -0.05:
-        final_prediction = "Bearish 📉"
-    else:
-        final_prediction = "Neutral ⚖️"
+    if   final_score >  0.05: final_prediction = "Bullish 📈"
+    elif final_score < -0.05: final_prediction = "Bearish 📉"
+    else:                      final_prediction = "Neutral ⚖️"
 
-    # ── CONFIDENCE ───────────────────────────────────────────────
-    positive     = sum(1 for s in scores if s > 0)
-    negative     = sum(1 for s in scores if s < 0)
-    agree_score  = (positive - negative) / 3
-    confidence   = abs(final_score)
-    confidence  *= (1 + agree_score * 0.5)
+    positive    = sum(1 for s in scores if s > 0)
+    negative    = sum(1 for s in scores if s < 0)
+    agree_score = (positive - negative) / 3
+    confidence  = abs(final_score)
+    confidence *= (1 + agree_score * 0.5)
     if regime == "TRENDING":
         confidence *= 1.1
-    confidence   = confidence ** 0.7
-    final_conf   = round(max(min(confidence, 1.0), 0.0) * 100, 2)
+    confidence  = confidence ** 0.7
+    final_conf  = round(max(min(confidence, 1.0), 0.0) * 100, 2)
 
-    # ── EXPLAINABILITY SCORES ─────────────────────────────────────
+    # ── EXPLAINABILITY ────────────────────────────────────────────
     explainability = {
         "ml_score":        round(ml_score, 4),
         "ml_label":        _label_score(ml_score, "ML"),
@@ -373,7 +455,6 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
         "disagreement":    round(disagreement, 2),
         "article_count":   art_count,
         "data_quality":    data_qual,
-        # Effective weights (after normalisation) as percentages
         "ml_weight_pct":   round(ml_w   * 100, 1),
         "ema_weight_pct":  round(ema_w  * 100, 1),
         "sent_weight_pct": round(sent_w * 100, 1),
@@ -409,77 +490,83 @@ def _compute_strategy(data, short_ema: int, long_ema: int, symbol: str = "") -> 
 
 
 # ─────────────────────────────────────────────
-# FULL STRATEGY RUNNER  (main route)
+# FULL STRATEGY RUNNER
 # ─────────────────────────────────────────────
 
 def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tuple:
     """
-    Full pipeline: price data (DB → yfinance) → compute → async DB save.
-    Returns (result_dict, data_df, short_col, long_col).
-    Price data is fetched then saved in background (non-blocking UI).
+    Full pipeline: Redis cache → DB → yfinance → compute → store.
+    Returns (result_dict, data_df_with_Date_column, short_col, long_col).
     """
-    # 🔥 REDIS CACHE CHECK (ADD THIS BLOCK)
-
     cache_key = f"{symbol}_{period}_{short_ema}_{long_ema}"
 
-    cached = redis_client.get(cache_key)
+    # ── 1. Redis cache check ──────────────────────────────────
+    try:
+        cached = redis_client.get(cache_key)
+    except Exception:
+        cached = None
 
     if cached:
         print(f"⚡ [{symbol}] REDIS HIT")
         result = json.loads(cached)
+        result["symbol"]    = symbol
+        result["period"]    = period
+        result["short_ema"] = short_ema
+        result["long_ema"]  = long_ema
 
-        # 🔥 LOAD DATA AGAIN FOR UI (IMPORTANT)
+        # Load data for chart — must have Date column
         data = load_price_data(symbol, period)
-
-        # fallback safety (rare case)
         if data is None or data.empty:
-            print(f"⏳ [{symbol}] Waiting for DB...")
+            data = get_stock_data(symbol, period)
+        if data is None or data.empty:
+            return result, pd.DataFrame(columns=["Date", "Close"]), \
+                   f"EMA{short_ema}", f"EMA{long_ema}"
 
-            for _ in range(3):  # retry 3 times
-                time.sleep(0.5)
-                data = load_price_data(symbol, period)
-                if data is not None and not data.empty:
-                    break
-
-            if data is None or data.empty:
-                print(f"⚠️ [{symbol}] DB unavailable — returning cached result only")
-
-                # return WITHOUT touching data
-                return result, None, None, None
-
+        # Add EMAs (needed for chart rendering)
         short_col = f"EMA{short_ema}"
         long_col  = f"EMA{long_ema}"
-
         data[short_col] = calculate_ema(data["Close"], short_ema)
         data[long_col]  = calculate_ema(data["Close"], long_ema)
 
+        # BUG FIX: normalize to "Date" column format
+        data = _normalize_data(data)
         return result, data, short_col, long_col
+
     print(f"🐢 [{symbol}] REDIS MISS")
 
-    # ── 1. Price data ──────────────────────────────────────────
+    # ── 2. Price data (DB → yfinance background save) ─────────
     data = load_price_data(symbol, period)
+
+    # Period coverage check: DB may have less history than requested.
+    # e.g. DB has 1y but user wants 2y — load_price_data returns 1y silently.
+    # If coverage < 80% of requested period, discard and refetch from yfinance.
+    if data is not None and not data.empty and not _is_data_sufficient(data, period):
+        print(f"⚠️ [{symbol}] DB data only covers {(data.index.max()-data.index.min()).days}d "
+              f"for period={period} — refetching from yfinance")
+        data = None
 
     if data is not None and not data.empty:
         print(f"⚡ [{symbol}] Loaded from DB (period={period})")
     else:
         print(f"📡 [{symbol}] Fetching from yfinance (period={period})…")
 
-        if symbol in _LOADING:
-            data = get_stock_data(symbol, period)
-        else:
+        if symbol not in _LOADING:
             _LOADING.add(symbol)
             data = get_stock_data(symbol, period)
 
             if data is not None:
-                def _save_bg():
-                    try:
-                        store_price_data(symbol, data)
-                        print(f"✅ [{symbol}] Price data saved (bg).")
-                    except Exception as e:
-                        print(f"❌ [{symbol}] Price save failed: {e}")
-                    finally:
-                        _LOADING.discard(symbol)
-                threading.Thread(target=_save_bg, daemon=True).start()
+                # Save to DB in background via Celery (non-blocking)
+                data_dict = data.copy()
+                data_dict.index = data_dict.index.astype(str)
+                data_dict = data_dict.to_dict()
+                try:
+                    save_price_task.delay(symbol, data_dict)
+                except Exception as e:
+                    print(f"⚠️ Celery price save failed (non-critical): {e}")
+
+            _LOADING.discard(symbol)
+        else:
+            data = get_stock_data(symbol, period)
 
     if data is None or data.empty:
         raise ValueError(
@@ -487,92 +574,77 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
             "Please enter a valid NSE symbol e.g. RELIANCE.NS or TCS.NS."
         )
 
-    # ── 2. Pure compute ─────────────────────────────────────────
+    # ── 3. Pure compute ─────────────────────────────────────────
     result, short_col, long_col = _compute_strategy(data, short_ema, long_ema, symbol)
-    result["symbol"] = symbol
-    result["period"] = period
+    result["symbol"]    = symbol
+    result["period"]    = period
+    result["short_ema"] = short_ema
+    result["long_ema"]  = long_ema
 
-    # ── 3. Async DB save (signals/trades/metrics) ───────────────
-    save_key = f"{symbol}_{short_ema}_{long_ema}"
-
-    if save_key not in _SAVING_NOW:
-        _SAVING_NOW.add(save_key)
-
-        _sig_copy = list(result["signals"])
-        _trd_copy = list(result["detailed_trades"])
-        _met_db   = {
-            **result["metrics"],
-            "Sharpe":       result["sharpe"],
-            "Max Drawdown": result["max_drawdown"],
-        }
-
-        def _bg_save():
-            try:
-                save_stock(symbol)
-
-                if not signals_exist(symbol, short_ema, long_ema):
-                    save_signals(symbol, _sig_copy, short_ema, long_ema)
-
-                if not trades_exist(symbol):
-                    save_trades(symbol, _trd_copy)
-
-                if not load_metrics(symbol, short_ema, long_ema):
-                    save_metrics(symbol, _met_db, short_ema, long_ema)
-
-                print(f"✅ [{symbol}] DB save complete.")
-            except Exception as exc:
-                print(f"⚠️ DB save error: {exc}")
-            finally:
-                _SAVING_NOW.discard(save_key)
-
-        threading.Thread(target=_bg_save, daemon=True).start()
-    else:
-        print(f"⏭️  [{symbol}] Save already in progress, skipping.")
-    # 🔥 STORE IN REDIS
+    # ── 4. Celery DB save (signals/trades/metrics) ──────────────
+    # BUG FIX: Convert pandas Timestamps to strings for JSON serialization
+    _sig_copy = [(s, str(d)) for s, d in result["signals"]]
+    _trd_copy = list(result["detailed_trades"])
+    _met_db   = {
+        **result["metrics"],
+        "Sharpe":       result["sharpe"],
+        "Max Drawdown": result["max_drawdown"],
+    }
     try:
-        redis_client.setex(
-            cache_key,
-            300,
-            json.dumps(result, default=str)
-        )
+        save_to_db_task.delay(symbol, _sig_copy, _trd_copy, _met_db,
+                              short_ema, long_ema)
     except Exception as e:
-        print(f"⚠️ Redis error: {e}")
-    return result, data, short_col, long_col
+        print(f"⚠️ Celery DB save failed (non-critical): {e}")
+
+    # ── 5. Store in Redis (converted to clean JSON) ──────────────
+    # BUG FIX: Convert signals to strings before Redis storage
+    result["signals"] = [(s, str(d)) for s, d in result["signals"]]
+    clean_result = clean_for_json(result)
+    try:
+        redis_client.setex(cache_key, 300, json.dumps(clean_result))
+        print(f"✅ [{symbol}] Stored in Redis (TTL=300s)")
+    except Exception as e:
+        print(f"⚠️ Redis store failed (non-critical): {e}")
+
+    # ── 6. BUG FIX: Normalize data to "Date" column format ──────
+    data = _normalize_data(data)
+    return clean_result, data, short_col, long_col
 
 
 # ─────────────────────────────────────────────
-# COMPARE  (read-only, never writes to DB)
+# COMPARE  (read-only, checks Redis first)
 # ─────────────────────────────────────────────
 
 def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> dict:
     """
-    Lightweight read-only compute for the compare API.
-    Loads from DB if available; falls back to yfinance WITHOUT saving.
-    Never writes to the database.
+    Read-only compute for compare API.
+    Checks Redis first, then DB, then yfinance (no DB write).
     """
+    # BUG FIX: check Redis cache before computing
     cache_key = f"{symbol}_{period}_{short_ema}_{long_ema}"
-    cached = redis_client.get(cache_key)
-
-    if cached:
-        try:
+    try:
+        cached = redis_client.get(cache_key)
+        if cached:
             print(f"⚡ [CMP {symbol}] REDIS HIT")
             return json.loads(cached)
-        except Exception:
-            print(f"⚠️ [CMP {symbol}] Redis decode failed — recomputing")
-    data = load_price_data(symbol, period)
+    except Exception:
+        pass
 
-    if data is not None:
+    data = load_price_data(symbol, period)
+    # Same period coverage check as run_strategy
+    if data is not None and not data.empty and not _is_data_sufficient(data, period):
+        print(f"⚠️ [CMP {symbol}] DB data insufficient for period={period} — refetching")
+        data = None
+    if data is not None and not data.empty:
         print(f"⚡ [CMP {symbol}] DB hit")
     else:
-        print(f"📡 [CMP {symbol}] DB miss — fetching from yfinance (no save)")
+        print(f"📡 [CMP {symbol}] DB miss — fetching (no save)")
         data = get_stock_data(symbol, period)
 
     if data is None or data.empty:
         raise ValueError(f"No data found for '{symbol}'.")
 
     result, _, _ = _compute_strategy(data, short_ema, long_ema, symbol)
-    redis_client.setex(cache_key, 300, json.dumps(result, default=str))
-
     return result
 
 
@@ -591,9 +663,9 @@ def index():
     buy_points  = []
     sell_points = []
 
-    # Read per-user history from cookie
     cookie_history = _get_cookie_history(request)
-    watchlist = [{"symbol": s} for s in cookie_history]
+    watchlist      = [{"symbol": s} for s in cookie_history]
+    saved_email    = _get_email_cookie(request)
 
     if request.method == "POST":
         try:
@@ -614,36 +686,36 @@ def index():
                 symbol, period, short_ema, long_ema
             )
 
-            if data is not None:
+            if data is not None and not data.empty and "Date" in data.columns:
                 prices      = data["Close"].tolist()
                 ema_short_d = data[short_col].tolist()
                 ema_long_d  = data[long_col].tolist()
-                dates       = data.index.strftime("%Y-%m-%d").tolist()
+                dates       = data["Date"].tolist()
 
-            if data is not None:
                 for signal, date in result["signals"]:
-
                     if isinstance(date, str):
-                        date_obj = datetime.fromisoformat(date)
+                        date_obj = pd.to_datetime(date)
                     else:
-                        date_obj = date
+                        date_obj = pd.to_datetime(str(date))
 
-                    # safer lookup
-                    row = data.loc[data.index == date_obj]
-
+                    date_str = date_obj.strftime("%Y-%m-%d")
+                    row = data[data["Date"] == date_str]
                     if not row.empty:
                         price = float(row["Close"].values[0])
-                        fd = date_obj.strftime("%Y-%m-%d")
-
-                        (buy_points if signal == "BUY" else sell_points).append({
-                            "x": fd,
-                            "y": price
-                        })
+                        (buy_points if signal == "BUY" else sell_points).append(
+                            {"x": date_str, "y": price}
+                        )
 
         except Exception as exc:
-            error = str(exc)
+            print("❌ BACKEND ERROR:", exc)
+            import traceback
+            traceback.print_exc()
+            error  = str(exc)
+            result = None
 
-    # Build response object so we can set cookie
+    result    = clean_for_json(result)
+    portfolio = result["portfolio"] if result else None
+
     resp = make_response(render_template(
         "index.html",
         result      = result,
@@ -654,26 +726,76 @@ def index():
         dates       = dates,
         buy_points  = buy_points,
         sell_points = sell_points,
-        portfolio   = result["portfolio"] if result else None,
+        portfolio   = portfolio,
         watchlist   = watchlist,
+        saved_email = saved_email,
     ))
 
-    # Update cookie if we successfully analyzed a stock
-    if result:
+    if result and "symbol" in result:
         _push_cookie_history(resp, result["symbol"], cookie_history)
 
     return resp
 
 
 # ─────────────────────────────────────────────
-# WATCHLIST API  (reads cookie → JSON)
+# WATCHLIST API
 # ─────────────────────────────────────────────
 
 @app.route("/api/watchlist", methods=["GET"])
 def api_watchlist():
-    """Returns this user's personal symbol history from their cookie."""
     history = _get_cookie_history(request)
     return jsonify([{"symbol": s} for s in history])
+
+
+# ─────────────────────────────────────────────
+# EMAIL ALERT API
+# ─────────────────────────────────────────────
+
+@app.route("/api/alerts", methods=["POST"])
+def api_set_alert():
+    """
+    Store an EMA convergence alert subscription.
+    Email is also saved to browser cookie for future pre-fill.
+    """
+    try:
+        body      = request.get_json()
+        email     = (body.get("email") or "").strip().lower()
+        symbol    = (body.get("symbol") or "").strip()
+        short_ema = int(body.get("short_ema", 20))
+        long_ema  = int(body.get("long_ema",  50))
+
+        if not email or "@" not in email:
+            return jsonify({"error": "Invalid email address."}), 400
+        if not symbol:
+            return jsonify({"error": "Symbol is required."}), 400
+
+        save_alert(email, symbol, short_ema, long_ema)
+
+        resp = make_response(jsonify({
+            "success": True,
+            "message": f"Alert set! You'll be notified when {symbol} EMAs converge."
+        }))
+        _set_email_cookie(resp, email)
+        return resp
+
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/alerts/delete", methods=["POST"])
+def api_delete_alert():
+    """Remove an active alert subscription."""
+    try:
+        from src.db_loader import delete_alert
+        body      = request.get_json()
+        email     = (body.get("email") or "").strip().lower()
+        symbol    = (body.get("symbol") or "").strip()
+        short_ema = int(body.get("short_ema", 20))
+        long_ema  = int(body.get("long_ema",  50))
+        delete_alert(email, symbol, short_ema, long_ema)
+        return jsonify({"success": True})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 # ─────────────────────────────────────────────
@@ -682,7 +804,6 @@ def api_watchlist():
 
 @app.route("/api/export/trades", methods=["POST"])
 def export_trades():
-    """Download trade history as CSV."""
     try:
         symbol = resolve_symbol(request.form.get("symbol", "").strip())
         period = format_period(request.form.get("period", "1y"))
@@ -715,7 +836,6 @@ def export_trades():
 
 @app.route("/api/export/signals", methods=["POST"])
 def export_signals():
-    """Download signal intelligence table as CSV."""
     try:
         symbol = resolve_symbol(request.form.get("symbol", "").strip())
         period = format_period(request.form.get("period", "1y"))
@@ -748,7 +868,7 @@ def export_signals():
 
 
 # ─────────────────────────────────────────────
-# STRATEGY COMPARISON API  (read-only)
+# STRATEGY COMPARISON API  (read-only, Redis-first)
 # ─────────────────────────────────────────────
 
 EMA_INSIGHTS = {
@@ -797,4 +917,5 @@ def api_compare():
 
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(debug=True)
+    preload_models()
+    app.run(debug=True, use_reloader=False)

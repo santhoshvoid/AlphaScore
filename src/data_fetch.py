@@ -1,5 +1,6 @@
 import yfinance as yf
 from src.db import get_connection
+import pandas as pd
 
 
 def get_stock_data(symbol, period):
@@ -51,6 +52,10 @@ def store_price_data(symbol, df):
         data_to_insert = []
 
         for index, row in df.iterrows():
+
+            # 🔥 FIX: always convert safely
+            index = pd.to_datetime(index)
+
             data_to_insert.append((
                 symbol,
                 index.date(),

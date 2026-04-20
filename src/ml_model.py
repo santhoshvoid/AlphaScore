@@ -52,6 +52,9 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
       - Replaced raw Close values with pct-change-based returns
     """
     df = df.copy()
+    # 🔥 FIX: ensure Volume always exists
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
 
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()

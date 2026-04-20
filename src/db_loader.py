@@ -1,11 +1,11 @@
 """
 db_loader.py  — All PostgreSQL read/write helpers for AlphaCross
-Fixes vs old version:
-  - load_price_data now accepts a period param and filters by start_date
-  - save_metrics uses ON CONFLICT DO UPDATE (upsert) instead of DO NOTHING
-  - save_signals / save_trades use specific conflict column lists
-  - Added save_stock()  → upserts symbol into the stocks table
-  - Added get_watchlist() → returns recently analysed symbols
+Changes vs previous version:
+  - Added save_alert()           — store email alert subscription
+  - Added get_alerts_for_user()  — get alerts for a specific email
+  - Added get_all_active_alerts()— get all active alerts (for Celery task)
+  - Added delete_alert()         — deactivate an alert
+  All other functions are unchanged.
 """
 
 from src.db import get_connection
@@ -38,8 +38,7 @@ def _period_to_start_date(period: str):
 def load_price_data(symbol: str, period: str = None):
     """
     Load OHLCV data from the prices table.
-    If `period` is given (e.g. '1y', '6mo') the rows are filtered to that
-    date range so the DB result always matches what yfinance would return.
+    If `period` is given the rows are filtered to that date range.
     Returns a DataFrame with DatetimeIndex, or None if no rows found.
     """
     try:
@@ -89,11 +88,7 @@ def load_price_data(symbol: str, period: str = None):
 # ─────────────────────────────────────────────
 
 def save_stock(symbol: str):
-    """
-    Upsert a symbol into the stocks table (tracks recently analysed stocks).
-    Requires a UNIQUE constraint on stocks.symbol — run this SQL once in Supabase:
-        ALTER TABLE stocks ADD CONSTRAINT stocks_symbol_unique UNIQUE (symbol);
-    """
+    """Upsert a symbol into the stocks table (tracks recently analysed stocks)."""
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -111,9 +106,7 @@ def save_stock(symbol: str):
 
 
 def get_watchlist(limit: int = 8):
-    """
-    Return the most recently analysed symbols from the stocks table.
-    """
+    """Return the most recently analysed symbols from the stocks table."""
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -137,11 +130,7 @@ def get_watchlist(limit: int = 8):
 # ─────────────────────────────────────────────
 
 def save_signals(symbol: str, signals: list, short_ema: int, long_ema: int):
-    """
-    Insert crossover signals. Requires this UNIQUE constraint in Supabase:
-        ALTER TABLE signals ADD CONSTRAINT signals_unique
-            UNIQUE (symbol, date, ema_short, ema_long);
-    """
+    """Insert crossover signals (deduped via ON CONFLICT DO NOTHING)."""
     if not signals:
         return
     try:
@@ -166,11 +155,7 @@ def save_signals(symbol: str, signals: list, short_ema: int, long_ema: int):
 # ─────────────────────────────────────────────
 
 def save_trades(symbol: str, trades: list):
-    """
-    Insert completed trades. Requires:
-        ALTER TABLE trades ADD CONSTRAINT trades_unique
-            UNIQUE (symbol, buy_date, sell_date);
-    """
+    """Insert completed trades (deduped via ON CONFLICT DO NOTHING)."""
     if not trades:
         return
     try:
@@ -203,12 +188,7 @@ def save_trades(symbol: str, trades: list):
 # ─────────────────────────────────────────────
 
 def save_metrics(symbol: str, metrics: dict, short_ema: int, long_ema: int):
-    """
-    Upsert strategy metrics. Requires:
-        ALTER TABLE metrics ADD CONSTRAINT metrics_unique
-            UNIQUE (symbol, short_ema, long_ema);
-    Uses DO UPDATE so subsequent runs always refresh the stored values.
-    """
+    """Upsert strategy metrics (DO UPDATE refreshes existing rows)."""
     try:
         conn = get_connection()
         cur  = conn.cursor()
@@ -265,47 +245,152 @@ def load_metrics(symbol: str, short_ema: int, long_ema: int):
     except Exception as e:
         print(f"⚠️ load_metrics error: {e}")
         return None
-    
+
+
 def signals_exist(symbol, short_ema, long_ema):
     try:
         conn = get_connection()
-        cur = conn.cursor()
-
+        cur  = conn.cursor()
         cur.execute("""
             SELECT 1 FROM signals
             WHERE symbol=%s AND ema_short=%s AND ema_long=%s
             LIMIT 1
         """, (symbol, short_ema, long_ema))
-
         row = cur.fetchone()
-
         cur.close()
         conn.close()
-
         return row is not None
-
     except Exception as e:
         print(f"⚠️ signals_exist error: {e}")
         return False
-    
+
+
 def trades_exist(symbol):
     try:
         conn = get_connection()
-        cur = conn.cursor()
-
+        cur  = conn.cursor()
         cur.execute("""
-            SELECT 1 FROM trades
-            WHERE symbol=%s
-            LIMIT 1
+            SELECT 1 FROM trades WHERE symbol=%s LIMIT 1
         """, (symbol,))
-
         row = cur.fetchone()
-
         cur.close()
         conn.close()
-
         return row is not None
-
     except Exception as e:
         print(f"⚠️ trades_exist error: {e}")
         return False
+
+
+# ─────────────────────────────────────────────
+# EMAIL ALERTS  (new)
+# ─────────────────────────────────────────────
+
+def save_alert(email: str, symbol: str, short_ema: int, long_ema: int):
+    """
+    Store an EMA convergence alert subscription.
+    Uses ON CONFLICT DO UPDATE to reactivate a previously deleted alert.
+    Requires the alerts table — run this SQL in Supabase once:
+
+        CREATE TABLE alerts (
+            id        SERIAL PRIMARY KEY,
+            email     TEXT    NOT NULL,
+            symbol    TEXT    NOT NULL,
+            short_ema INTEGER NOT NULL,
+            long_ema  INTEGER NOT NULL,
+            active    BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (email, symbol, short_ema, long_ema)
+        );
+    """
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO alerts (email, symbol, short_ema, long_ema, active)
+            VALUES (%s, %s, %s, %s, TRUE)
+            ON CONFLICT (email, symbol, short_ema, long_ema)
+            DO UPDATE SET active = TRUE, created_at = NOW();
+        """, (email, symbol, short_ema, long_ema))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"✅ Alert saved: {email} → {symbol} EMA {short_ema}/{long_ema}")
+    except Exception as e:
+        print(f"⚠️ save_alert error: {e}")
+        raise
+
+
+def delete_alert(email: str, symbol: str, short_ema: int, long_ema: int):
+    """Deactivate (soft-delete) an alert."""
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            UPDATE alerts SET active = FALSE
+            WHERE  email     = %s
+              AND  symbol    = %s
+              AND  short_ema = %s
+              AND  long_ema  = %s;
+        """, (email, symbol, short_ema, long_ema))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ delete_alert error: {e}")
+        raise
+
+
+def get_alerts_for_user(email: str) -> list:
+    """Return all active alerts for a given email address."""
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT symbol, short_ema, long_ema, created_at
+            FROM   alerts
+            WHERE  email = %s AND active = TRUE
+            ORDER  BY created_at DESC;
+        """, (email,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [
+            {
+                "symbol":    r[0],
+                "short_ema": r[1],
+                "long_ema":  r[2],
+                "created_at": str(r[3]),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"⚠️ get_alerts_for_user error: {e}")
+        return []
+
+
+def get_all_active_alerts() -> list:
+    """Return all active alert subscriptions (used by Celery task)."""
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT email, symbol, short_ema, long_ema
+            FROM   alerts
+            WHERE  active = TRUE
+            ORDER  BY symbol;
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [
+            {
+                "email":     r[0],
+                "symbol":    r[1],
+                "short_ema": r[2],
+                "long_ema":  r[3],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"⚠️ get_all_active_alerts error: {e}")
+        return []
