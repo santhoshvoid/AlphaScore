@@ -6,9 +6,8 @@ __pycache__/
 
 # Virtual environment
 venv/
-.env/
 
-# Environment variables (VERY IMPORTANT)
+# Environment variables
 .env
 
 # VS Code
@@ -26,12 +25,13 @@ Thumbs.db
 
 # Cache
 .cache/
+.pytest_cache/
 
-# Jupyter (if any)
+# Jupyter
 .ipynb_checkpoints/
 
-# Celery beat schedule
+# Celery
 celerybeat-schedule
 
-# Temporary files
+# Temp
 *.tmp
