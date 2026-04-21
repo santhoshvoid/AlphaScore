@@ -68,6 +68,7 @@ def _scores_via_api(texts: list) -> list:
       [[{"label": "positive", "score": 0.9}, {"label": "negative", ...}, ...], ...]
     """
     HF_TOKEN = os.getenv("HF_TOKEN", "")
+    print("HF TOKEN (first 10 chars):", HF_TOKEN[:10])
     headers  = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
     scores = []

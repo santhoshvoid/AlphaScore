@@ -665,7 +665,7 @@ def index():
                 prices      = data["Close"].tolist()
                 ema_short_d = data[short_col].tolist()
                 ema_long_d  = data[long_col].tolist()
-                dates       = data["Date"].tolist()
+                dates = data.index.strftime("%Y-%m-%d").tolist()
 
             if data is not None:
                 for signal, date in result["signals"]:

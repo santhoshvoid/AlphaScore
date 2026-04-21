@@ -25,6 +25,9 @@ celery = Celery(
     include=["src.tasks"]
 )
 
+celery.conf.broker_use_ssl = {"ssl_cert_reqs": "none"}
+celery.conf.redis_backend_use_ssl = {"ssl_cert_reqs": "none"}
+
 celery.conf.update(
     task_serializer="json",
     accept_content=["json"],
