@@ -1242,3 +1242,16 @@ body.dark .export-btn {
     text-align: right;
     font-style: italic;
 }
+
+/* FIX: Prediction description visibility */
+.pred-desc {
+    color: var(--text-muted) !important;
+    opacity: 1 !important;
+    font-weight: 500;
+    line-height: 1.5;
+}
+
+/* Extra safety (in case parent has opacity) */
+.prediction-box {
+    opacity: 1 !important;
+}

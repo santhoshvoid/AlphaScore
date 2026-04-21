@@ -560,12 +560,17 @@
 <script>
 (function() {
     var btn = document.getElementById('themeToggle');
+    if (!btn) return;
     var THRESHOLD = 80;
     var floating  = false;
 
-    if (localStorage.getItem('theme') === 'dark') {
+    var savedTheme = localStorage.getItem('theme');
+
+    if (savedTheme === 'dark') {
         document.body.classList.add('dark');
         btn.textContent = '☀️';
+    } else {
+        btn.textContent = '🌙';
     }
 
     btn.onclick = function() {
