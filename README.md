@@ -21,6 +21,18 @@
 
 ---
 
+## ⚡ TL;DR
+
+Full-stack stock analysis system combining:
+- EMA-based backtesting engine
+- XGBoost ML prediction
+- NLP sentiment (FinBERT/VADER)
+- Redis caching + Celery async processing
+
+→ Outputs explainable Buy/Sell signals with confidence and performance metrics
+
+---
+
 ## The Problem — Why This Exists
 
 If you've spent any time around stock trading, you've probably heard of EMA crossovers. The Golden Cross, the Death Cross — these aren't just fancy names. They're among the most widely-used technical signals in the world, used by retail traders, hedge funds, and algorithmic systems alike.
