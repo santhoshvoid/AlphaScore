@@ -14,11 +14,14 @@ To run both worker + beat together (development only):
 
 from celery import Celery
 from celery.schedules import crontab
+import os
+
+REDIS_URL = os.getenv("REDIS_URL")
 
 celery = Celery(
     "alpha_cross",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/0",
+    broker=REDIS_URL,
+    backend=REDIS_URL,
     include=["src.tasks"]
 )
 

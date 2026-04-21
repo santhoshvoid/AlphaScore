@@ -1,0 +1,19 @@
+# Dockerfile.worker — for Fly.io Celery worker
+# Build: fly deploy --dockerfile Dockerfile.worker
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps for psycopg2
+RUN apt-get update && apt-get install -y \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Run Celery worker + beat in the same process (fine for free tier)
+CMD ["celery", "-A", "celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=1"]
