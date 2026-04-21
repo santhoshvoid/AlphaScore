@@ -496,6 +496,16 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
         data[short_col] = calculate_ema(data["Close"], short_ema)
         data[long_col]  = calculate_ema(data["Close"], long_ema)
 
+        # ── CRITICAL: reset DatetimeIndex → "Date" column ───────
+        # load_price_data returns a DatetimeIndex df.
+        # The template expects data["Date"] as a plain string column.
+        data = data.reset_index()
+        if "index" in data.columns:
+            data.rename(columns={"index": "Date"}, inplace=True)
+        # After reset_index the column is named "Date" (matching the
+        # DataFrame column name set in load_price_data).
+        data["Date"] = pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")
+
         result = clean_for_json(result)
         if data is None or data.empty:
             data = pd.DataFrame(columns=["Date", "Close"])
@@ -665,7 +675,7 @@ def index():
                 prices      = data["Close"].tolist()
                 ema_short_d = data[short_col].tolist()
                 ema_long_d  = data[long_col].tolist()
-                dates = data.index.strftime("%Y-%m-%d").tolist()
+                dates       = data["Date"].tolist()
 
             if data is not None:
                 for signal, date in result["signals"]:
