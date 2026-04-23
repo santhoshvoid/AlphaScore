@@ -69,6 +69,9 @@ COOKIE_MAX_ITEMS = 8
 
 USE_HF_INFERENCE_API = os.getenv("USE_HF_INFERENCE_API", "false").lower() == "true"
 
+@app.route("/health")
+def health():
+    return "OK", 200
 
 def preload_models():
     print("🚀 Preloading ML models…")
