@@ -468,6 +468,59 @@ def _redis_setex(key: str, ttl: int, value: str):
 
 
 # ─────────────────────────────────────────────
+# DATE-RANGE VALIDATOR
+# ─────────────────────────────────────────────
+
+def _data_covers_period(data: pd.DataFrame, period: str) -> bool:
+    """
+    Return True only if `data` starts early enough to satisfy `period`.
+
+    Why this matters
+    ────────────────
+    The DB accumulates rows across requests.  If the user first asks for 1y,
+    only 1y rows are stored.  A subsequent 2y request then hits the DB, gets
+    those 1y rows back (they *are* within the 2y window), and mistakenly
+    treats them as 2y data — producing identical charts and metrics for every
+    longer period thereafter.
+
+    Fix: compare the earliest row in the loaded data against the expected
+    start date for the requested period.  Allow 15 calendar days of slack
+    (weekends, public holidays, recently-listed stocks).
+    """
+    from datetime import datetime, timedelta
+
+    if period == "max" or not period:
+        return True  # can't validate "max", trust the DB
+
+    now = datetime.now()
+    try:
+        if period.endswith("y"):
+            years          = int(period[:-1])
+            expected_start = now - timedelta(days=int(365.25 * years))
+        elif period.endswith("mo"):
+            months         = int(period[:-2])
+            expected_start = now - timedelta(days=30 * months)
+        else:
+            return True  # unknown format — let it through
+    except (ValueError, AttributeError):
+        return True
+
+    tolerance    = timedelta(days=15)
+    actual_start = pd.to_datetime(data.index.min())
+    cutoff       = pd.Timestamp(expected_start + tolerance)
+
+    if actual_start > cutoff:
+        print(
+            f"⚠️  DB data starts {actual_start.date()} but period={period} "
+            f"requires data from ~{expected_start.date()}. "
+            f"Falling back to yfinance."
+        )
+        return False
+
+    return True
+
+
+# ─────────────────────────────────────────────
 # FULL STRATEGY RUNNER  (main route)
 # ─────────────────────────────────────────────
 
@@ -518,6 +571,13 @@ def run_strategy(symbol: str, period: str, short_ema: int, long_ema: int) -> tup
 
     # ── 1. Price data ──────────────────────────────────────────
     data = load_price_data(symbol, period)
+
+    # Validate the DB data actually covers the requested period.
+    # A shorter previous request (e.g. 1y) may have stored rows that
+    # technically fall within a longer period (e.g. 2y), causing the DB
+    # hit to silently return stale/short data for every longer period.
+    if data is not None and not data.empty and not _data_covers_period(data, period):
+        data = None  # force yfinance fetch below
 
     if data is not None and not data.empty:
         print(f"⚡ [{symbol}] Loaded from DB (period={period})")
@@ -617,6 +677,11 @@ def compare_strategy(symbol: str, period: str, short_ema: int, long_ema: int) ->
 
     # ── Cache miss — compute ─────────────────────────────────────
     data = load_price_data(symbol, period)
+
+    # Same period-coverage guard as in run_strategy: reject DB data
+    # that is too short for the requested period.
+    if data is not None and not data.empty and not _data_covers_period(data, period):
+        data = None
 
     if data is not None and not data.empty:
         print(f"⚡ [CMP {symbol}] DB hit")
